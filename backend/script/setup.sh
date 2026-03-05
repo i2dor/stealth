@@ -15,17 +15,20 @@
 # =============================================================================
 set -euo pipefail
 
-# ─── Colours ──────────────────────────────────────────────────────────────────
+# ─── Config ───────────────────────────────────────────────────────────────────
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DATADIR="${SCRIPT_DIR}/bitcoin-data"
+REGTEST_DIR="${DATADIR}/regtest"
+WALLETS=(miner alice bob carol exchange risky)
+INITIAL_BLOCKS=110          # must be >100 so coinbases mature
+MINER_FUND_BTC=500          # approximate, depends on block subsidy
+
+# ─── Helpers ──────────────────────────────────────────────────────────────────
 G="\033[92m"; Y="\033[93m"; R="\033[91m"; B="\033[1m"; C="\033[96m"; RST="\033[0m"
 ok()   { echo -e "  ${G}✓${RST} $*"; }
 info() { echo -e "  ${Y}ℹ${RST} $*"; }
 err()  { echo -e "  ${R}✗${RST} $*"; exit 1; }
-
-# ─── Config ───────────────────────────────────────────────────────────────────
-REGTEST_DIR="${HOME}/.bitcoin/regtest"
-WALLETS=(miner alice bob carol exchange risky)
-INITIAL_BLOCKS=110          # must be >100 so coinbases mature
-MINER_FUND_BTC=500          # approximate, depends on block subsidy
+bcli() { bitcoin-cli -datadir="$DATADIR" -regtest "$@"; }
 
 # ─── Parse args ───────────────────────────────────────────────────────────────
 FRESH=0
@@ -44,7 +47,7 @@ echo ""
 echo -e "${B}Step 1: Stop any running bitcoind${RST}"
 
 # Try to stop regtest instance (port 18443)
-if bitcoin-cli -regtest stop 2>/dev/null; then
+if bcli stop 2>/dev/null; then
   ok "Stopped regtest bitcoind"
   sleep 2
 else
@@ -80,7 +83,9 @@ fi
 # ─── 3. Start bitcoind ────────────────────────────────────────────────────────
 echo ""
 echo -e "${B}Step 3: Start bitcoind${RST}"
+mkdir -p "$DATADIR"
 bitcoind -daemon \
+  -datadir="$DATADIR" \
   -regtest \
   -txindex=1 \
   -server=1 \
@@ -94,7 +99,7 @@ echo -n "  … waiting for RPC"
 for i in $(seq 1 30); do
   sleep 1
   echo -n "."
-  if bitcoin-cli -regtest getblockchaininfo > /dev/null 2>&1; then
+  if bcli getblockchaininfo > /dev/null 2>&1; then
     echo ""
     ok "RPC ready after ${i}s"
     break
@@ -105,18 +110,18 @@ for i in $(seq 1 30); do
   fi
 done
 
-BLOCKS=$(bitcoin-cli -regtest getblockcount)
+BLOCKS=$(bcli getblockcount)
 info "Chain height: ${BLOCKS} blocks"
 
 # ─── 4. Create / load wallets ─────────────────────────────────────────────────
 echo ""
 echo -e "${B}Step 4: Create wallets${RST}"
 for w in "${WALLETS[@]}"; do
-  if bitcoin-cli -regtest createwallet "$w" 2>/dev/null | grep -q '"name"'; then
+  if bcli createwallet "$w" 2>/dev/null | grep -q '"name"'; then
     ok "Created wallet: ${w}"
   else
     # Wallet DB already exists on disk — just load it
-    if bitcoin-cli -regtest loadwallet "$w" 2>/dev/null | grep -q '"name"'; then
+    if bcli loadwallet "$w" 2>/dev/null | grep -q '"name"'; then
       ok "Loaded existing wallet: ${w}"
     else
       # Already loaded (returned error -35)
@@ -128,20 +133,20 @@ done
 # ─── 5. Mine initial blocks (only if fresh or chain has <110 blocks) ──────────
 echo ""
 echo -e "${B}Step 5: Mine initial blocks${RST}"
-BLOCKS=$(bitcoin-cli -regtest getblockcount)
+BLOCKS=$(bcli getblockcount)
 
 if [[ $BLOCKS -lt $INITIAL_BLOCKS ]]; then
   NEED=$(( INITIAL_BLOCKS - BLOCKS ))
   info "At block ${BLOCKS}, need ${NEED} more to reach ${INITIAL_BLOCKS}"
-  MINER_ADDR=$(bitcoin-cli -regtest -rpcwallet=miner getnewaddress "" bech32)
-  bitcoin-cli -regtest generatetoaddress "$NEED" "$MINER_ADDR" > /dev/null
-  BLOCKS=$(bitcoin-cli -regtest getblockcount)
+  MINER_ADDR=$(bcli -rpcwallet=miner getnewaddress "" bech32)
+  bcli generatetoaddress "$NEED" "$MINER_ADDR" > /dev/null
+  BLOCKS=$(bcli getblockcount)
   ok "Mined to block ${BLOCKS}"
 else
   ok "Already at block ${BLOCKS} — no mining needed"
 fi
 
-MINER_BAL=$(bitcoin-cli -regtest -rpcwallet=miner getbalance)
+MINER_BAL=$(bcli -rpcwallet=miner getbalance)
 ok "Miner balance: ${MINER_BAL} BTC"
 
 # ─── 6. Summary ───────────────────────────────────────────────────────────────
@@ -150,7 +155,7 @@ echo -e "${B}${C}═════════════════════
 echo -e "${B}  Setup complete!${RST}"
 echo -e "${B}${C}══════════════════════════════════════════════════════════${RST}"
 echo -e "  Chain:   ${G}regtest${RST}"
-echo -e "  Blocks:  ${G}$(bitcoin-cli -regtest getblockcount)${RST}"
+echo -e "  Blocks:  ${G}$(bcli getblockcount)${RST}"
 echo -e "  Wallets: ${G}${WALLETS[*]}${RST}"
 echo ""
 echo -e "  Next steps:"
