@@ -70,13 +70,13 @@ Edit `backend/script/config.ini` to match your node:
 
 ```ini
 [bitcoin]
-# Network: regtest | testnet | signet | mainnet
 network = regtest
-
-# Path to bitcoin-cli (full path if not on PATH)
 cli = bitcoin-cli
 
-# Optional RPC overrides (leave blank to use ~/.bitcoin/bitcoin.conf defaults)
+# Data directory — matches setup.sh (relative to config.ini location)
+datadir = bitcoin-data
+
+# Optional RPC overrides (leave blank to use cookie auth from the datadir)
 rpchost =
 rpcport =
 rpcuser =
@@ -103,7 +103,7 @@ This script sends transactions between the test wallets to reproduce all 12 dete
 After it runs, get a descriptor to paste into the app:
 
 ```bash
-bitcoin-cli -regtest -rpcwallet=alice listdescriptors | python3 -c \
+bitcoin-cli -datadir=bitcoin-data -regtest -rpcwallet=alice listdescriptors | python3 -c \
   "import sys,json; d=json.load(sys.stdin)['descriptors']; print(d[0]['desc'])"
 ```
 
@@ -140,11 +140,21 @@ Open `http://localhost:5173` in your browser.
 
 ```
 stealth/
-├── frontend/          # React + Vite UI
+├── frontend/              # React + Vite UI
+│   └── src/
+│       ├── components/    # FindingCard, VulnerabilityBadge
+│       ├── screens/       # InputScreen, LoadingScreen, ReportScreen
+│       └── services/      # walletService.js (API client)
 ├── backend/
-│   ├── script/        # detect.py, reproduce.py, setup.sh, bitcoin_rpc.py, config.ini
-│   └── src/           # Quarkus Java REST API
-└── slides/            # Slidev pitch presentation
+│   ├── script/            # Python scripts + regtest data
+│   │   ├── setup.sh       # Bootstrap bitcoind regtest
+│   │   ├── reproduce.py   # Create 12 vulnerability scenarios
+│   │   ├── detect.py      # Privacy vulnerability detector
+│   │   ├── bitcoin_rpc.py # bitcoin-cli wrapper
+│   │   ├── config.ini     # Connection config (datadir, network)
+│   │   └── bitcoin-data/  # Regtest chain data (gitignored)
+│   └── src/StealthBackend/ # Quarkus Java REST API (single /api/wallet/scan endpoint)
+└── slides/                # Slidev pitch presentation
 ```
 
 ## Privacy notice
