@@ -20,11 +20,8 @@ Usage:
 import sys
 import os
 import json
-import time
-import hashlib
 import argparse
 from collections import defaultdict
-from math import log2
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from bitcoin_rpc import cli, get_tx
