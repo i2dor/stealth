@@ -5,7 +5,6 @@ Connection settings are read from config.ini in the same directory.
 
 import json
 import subprocess
-import time
 import os
 import configparser
 
@@ -22,6 +21,13 @@ def _build_base_args(section):
     network = section.get("network", "regtest").strip().lower()
 
     args = [cli_bin]
+
+    # Datadir — resolve relative paths from this file's directory
+    datadir = section.get("datadir", "").strip()
+    if datadir:
+        if not os.path.isabs(datadir):
+            datadir = os.path.join(os.path.dirname(os.path.abspath(__file__)), datadir)
+        args.append(f"-datadir={datadir}")
 
     network_flags = {
         "regtest": "-regtest",
@@ -41,10 +47,6 @@ def _build_base_args(section):
 
 _cfg = _load_config()
 _BASE_ARGS = _build_base_args(_cfg)
-
-# Keep these for any scripts that might reference them directly
-CLI = _cfg.get("cli", "bitcoin-cli")
-SIGNET_ARGS = _BASE_ARGS
 
 def cli(*args, wallet=None):
     """Call bitcoin-cli [network] [wallet] <args> and return parsed JSON or string."""
@@ -71,23 +73,6 @@ def mine_blocks(n=1):
     miner_addr = cli("getnewaddress", "", "bech32", wallet="miner")
     cli("generatetoaddress", n, miner_addr)
     return int(cli("getblockcount"))
-
-
-def fund_wallet(wallet_name, amount=1.0, from_wallet="miner"):
-    """Send `amount` BTC from `from_wallet` to a new address in `wallet_name`."""
-    addr = cli("getnewaddress", "", "bech32", wallet=wallet_name)
-    txid = cli("sendtoaddress", addr, f"{amount:.8f}", wallet=from_wallet)
-    return txid, addr
-
-
-def wait_for_mempool_empty(timeout=60):
-    """Wait until mempool is empty (all txs mined)."""
-    for _ in range(timeout * 2):
-        info = cli("getmempoolinfo")
-        if info["size"] == 0:
-            return True
-        time.sleep(0.5)
-    return False
 
 
 def get_tx(txid):
@@ -128,11 +113,6 @@ def finalize_psbt(psbt):
     return cli("finalizepsbt", psbt)
 
 
-def decode_psbt(psbt):
-    """Decode a PSBT."""
-    return cli("decodepsbt", psbt)
-
-
 def create_raw_tx(inputs, outputs):
     """Create a raw transaction."""
     return cli("createrawtransaction", json.dumps(inputs), json.dumps(outputs))
@@ -141,11 +121,6 @@ def create_raw_tx(inputs, outputs):
 def sign_raw_tx(wallet_name, hex_tx):
     """Sign a raw transaction."""
     return cli("signrawtransactionwithwallet", hex_tx, wallet=wallet_name)
-
-
-def decode_raw_tx(hex_tx):
-    """Decode a raw transaction."""
-    return cli("decoderawtransaction", hex_tx)
 
 
 def get_block_count():
@@ -163,15 +138,3 @@ def send_to_address(wallet_name, address, amount):
     return cli("sendtoaddress", address, f"{amount:.8f}", wallet=wallet_name)
 
 
-if __name__ == "__main__":
-    print("Testing RPC connection...")
-    info = cli("getblockchaininfo")
-    print(f"  Chain: {info['chain']}")
-    print(f"  Blocks: {info['blocks']}")
-
-    for w in ["miner", "alice", "bob", "carol", "exchange", "risky"]:
-        try:
-            bal = get_balance(w)
-            print(f"  {w}: {bal} BTC")
-        except Exception as e:
-            print(f"  {w}: ERROR - {e}")
