@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import base58
 import sys
 import re
 import json
@@ -41,6 +42,31 @@ def parse_descriptor(descriptor):
         "descriptor": desc,
     }
 
+SLIP132_TO_BIP32 = {
+    "xpub": ("0488b21e", "0488b21e"),
+    "ypub": ("049d7cb2", "0488b21e"),
+    "zpub": ("04b24746", "0488b21e"),
+    "Ypub": ("0295b43f", "0488b21e"),
+    "Zpub": ("02aa7ed3", "0488b21e"),
+    "tpub": ("043587cf", "043587cf"),
+    "upub": ("044a5262", "043587cf"),
+    "vpub": ("045f1cf6", "043587cf"),
+    "Upub": ("024289ef", "043587cf"),
+    "Vpub": ("02575483", "043587cf"),
+}
+
+def convert_slip132_to_bip32(extpub):
+    prefix = extpub[:4]
+    if prefix not in SLIP132_TO_BIP32:
+        raise ValueError(f"Unsupported extended pub prefix: {prefix}")
+
+    src_hex, dst_hex = SLIP132_TO_BIP32[prefix]
+    raw = base58.b58decode_check(extpub)
+    if raw[:4].hex() != src_hex:
+        raise ValueError(f"Unexpected version bytes for {prefix}")
+
+    converted = bytes.fromhex(dst_hex) + raw[4:]
+    return base58.b58encode_check(converted).decode()
 
 def xpub_net_and_key(extpub):
     prefix = extpub[:4]
@@ -53,7 +79,8 @@ def xpub_net_and_key(extpub):
 
 def derive_wpkh_addresses(extpub, count):
     net = xpub_net_and_key(extpub)
-    ctx = Bip32Secp256k1.FromExtendedKey(extpub)
+    bip32_key = convert_slip132_to_bip32(extpub)
+    ctx = Bip32Secp256k1.FromExtendedKey(bip32_key)
     addrs = []
 
     for i in range(count):
