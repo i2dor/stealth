@@ -77,16 +77,21 @@ def xpub_net_and_key(extpub):
     return "mainnet" if mainnet else "testnet"
 
 
-def derive_wpkh_addresses(extpub, count):
+def derive_wpkh_addresses(extpub, count, branch):
     net = xpub_net_and_key(extpub)
     bip32_key = convert_slip132_to_bip32(extpub)
-    ctx = Bip32Secp256k1.FromExtendedKey(bip32_key)
-    addrs = []
+    account_ctx = Bip32Secp256k1.FromExtendedKey(bip32_key)
+    branch_ctx = account_ctx.ChildKey(branch)
 
+    addrs = []
     for i in range(count):
-        child = ctx.ChildKey(i)
+        child = branch_ctx.ChildKey(i)
         pubkey_bytes = child.PublicKey().RawCompressed().ToBytes()
-        hrp = CoinsConf.BitcoinMainNet.ParamByKey("p2wpkh_hrp") if net == "mainnet" else CoinsConf.BitcoinTestNet.ParamByKey("p2wpkh_hrp")
+        hrp = (
+            CoinsConf.BitcoinMainNet.ParamByKey("p2wpkh_hrp")
+            if net == "mainnet"
+            else CoinsConf.BitcoinTestNet.ParamByKey("p2wpkh_hrp")
+        )
         addr = P2WPKHAddrEncoder.EncodeKey(pubkey_bytes, hrp=hrp)
         addrs.append(addr)
 
