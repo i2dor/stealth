@@ -103,7 +103,7 @@ def derive_wpkh_addresses(extpub, count, branch):
 
 def api_get(path):
     url = f"{API_BASE}{path}"
-    r = requests.get(url, timeout=30)
+    r = requests.get(url, timeout=(5, 10))
     r.raise_for_status()
     return r.json()
 
@@ -188,19 +188,7 @@ def collect_wallet_data(addresses):
                     "blockheight": tx.get("status", {}).get("block_height", 0),
                 })
 
-        try:
-            addr_utxos = address_utxos(addr)
-        except Exception:
-            addr_utxos = []
-
-        for u in addr_utxos:
-            utxos.append({
-                "txid": u["txid"],
-                "vout": u["vout"],
-                "address": addr,
-                "amount": u["value"] / 100_000_000,
-                "confirmations": 1 if u.get("status", {}).get("confirmed") else 0,
-            })
+    addr_utxos = []
 
     return tx_map, addr_txs, utxos
 
@@ -399,7 +387,7 @@ def main():
     descriptor = sys.argv[1]
     parsed = parse_descriptor(descriptor)
 
-    addresses = derive_wpkh_addresses(parsed["extpub"], 300, parsed["branch"])
+    addresses = derive_wpkh_addresses(parsed["extpub"], 20, parsed["branch"])
     addr_map = build_addr_map(addresses, parsed["branch"])
 
     tx_map, addr_txs, utxos = collect_wallet_data(addresses)
