@@ -420,6 +420,9 @@ def main():
             "addresses_derived": len(addresses),
             "utxos_found": len(utxos),
         },
+        "debug": {
+            "first_addresses": addresses[:10]
+        },
         "findings": findings,
         "warnings": warnings,
         "summary": {
