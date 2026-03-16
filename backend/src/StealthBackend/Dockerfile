@@ -11,15 +11,17 @@ FROM eclipse-temurin:21-jre
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y \
-    python3 python3-pip python3-dev build-essential gcc g++ libffi-dev libssl-dev curl \
+    python3 python3-pip python3-venv python3-dev build-essential gcc g++ libffi-dev libssl-dev curl \
     && rm -rf /var/lib/apt/lists/*
 
 COPY backend/script /app/script
-RUN python3 -m pip install --upgrade pip setuptools wheel
-RUN pip3 install --no-cache-dir -r /app/script/requirements.txt
+
+RUN python3 -m venv /opt/venv
+RUN /opt/venv/bin/pip install --no-cache-dir -r /app/script/requirements.txt
 
 COPY --from=build /app/target/quarkus-app /app/quarkus-app
 
+ENV PATH="/opt/venv/bin:$PATH"
 ENV QUARKUS_HTTP_HOST=0.0.0.0
 ENV QUARKUS_HTTP_PORT=10000
 
