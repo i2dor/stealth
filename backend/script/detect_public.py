@@ -397,7 +397,7 @@ def main():
     descriptor = sys.argv[1]
     parsed = parse_descriptor(descriptor)
 
-    addresses = derive_wpkh_addresses(parsed["extpub"], 50)
+    addresses = derive_wpkh_addresses(parsed["extpub"], 1000)
     addr_map = build_addr_map(addresses, parsed["branch"])
 
     tx_map, addr_txs, utxos = collect_wallet_data(addresses)
