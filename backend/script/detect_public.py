@@ -42,6 +42,7 @@ def parse_descriptor(descriptor):
         "descriptor": desc,
     }
 
+
 SLIP132_TO_BIP32 = {
     "xpub": ("0488b21e", "0488b21e"),
     "ypub": ("049d7cb2", "0488b21e"),
@@ -54,6 +55,7 @@ SLIP132_TO_BIP32 = {
     "Upub": ("024289ef", "043587cf"),
     "Vpub": ("02575483", "043587cf"),
 }
+
 
 def convert_slip132_to_bip32(extpub):
     prefix = extpub[:4]
@@ -68,10 +70,11 @@ def convert_slip132_to_bip32(extpub):
     converted = bytes.fromhex(dst_hex) + raw[4:]
     return base58.b58encode_check(converted).decode()
 
+
 def xpub_net_and_key(extpub):
     prefix = extpub[:4]
-    mainnet = prefix in {"xpub", "ypub", "zpub"}
-    testnet = prefix in {"tpub", "upub", "vpub"}
+    mainnet = prefix in {"xpub", "ypub", "zpub", "Ypub", "Zpub"}
+    testnet = prefix in {"tpub", "upub", "vpub", "Upub", "Vpub"}
     if not (mainnet or testnet):
         raise ValueError(f"Unsupported extended pub prefix: {prefix}")
     return "mainnet" if mainnet else "testnet"
@@ -107,8 +110,7 @@ def api_get(path):
 
 def address_txs(address):
     txs = []
-    path = f"/address/{address}/txs"
-    batch = api_get(path)
+    batch = api_get(f"/address/{address}/txs")
     txs.extend(batch)
 
     while len(batch) == 25:
@@ -125,10 +127,6 @@ def address_utxos(address):
     return api_get(f"/address/{address}/utxo")
 
 
-def tx_outspends(txid):
-    return api_get(f"/tx/{txid}/outspends")
-
-
 def normalize_script_type(scriptpubkey_type):
     mapping = {
         "v0_p2wpkh": "p2wpkh",
@@ -142,7 +140,6 @@ def normalize_script_type(scriptpubkey_type):
 
 
 def collect_wallet_data(addresses):
-    our_set = set(addresses)
     tx_map = {}
     addr_txs = defaultdict(list)
     utxos = []
@@ -402,7 +399,7 @@ def main():
     descriptor = sys.argv[1]
     parsed = parse_descriptor(descriptor)
 
-    addresses = derive_wpkh_addresses(parsed["extpub"], 200, parsed["branch"])
+    addresses = derive_wpkh_addresses(parsed["extpub"], 300, parsed["branch"])
     addr_map = build_addr_map(addresses, parsed["branch"])
 
     tx_map, addr_txs, utxos = collect_wallet_data(addresses)
