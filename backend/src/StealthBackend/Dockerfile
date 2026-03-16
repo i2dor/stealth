@@ -2,14 +2,10 @@ FROM maven:3.9.9-eclipse-temurin-21 AS build
 WORKDIR /app
 
 COPY backend/src/StealthBackend/pom.xml /app/pom.xml
-COPY backend/src/StealthBackend/mvnw /app/mvnw
-COPY backend/src/StealthBackend/mvnw.cmd /app/mvnw.cmd
-COPY backend/src/StealthBackend/.mvn /app/.mvn
-
-RUN chmod +x /app/mvnw && /app/mvnw -q -DskipTests dependency:go-offline
+RUN mvn -q -DskipTests dependency:go-offline
 
 COPY backend/src/StealthBackend /app
-RUN /app/mvnw -DskipTests package
+RUN mvn -DskipTests package
 
 FROM eclipse-temurin:21-jre
 WORKDIR /app
