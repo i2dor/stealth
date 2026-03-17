@@ -13,17 +13,40 @@ export default function App() {
   const [error, setError] = useState('')
   const [success, setSuccess] = useState('')
   const [offset, setOffset] = useState(0)
+  const [reportCache, setReportCache] = useState({})
 
   async function runAnalysis(desc, nextOffset = 0) {
     setDescriptor(desc)
     setError('')
     setSuccess('')
+
+    const cacheKey = `${desc}::${nextOffset}`
+
+    if (reportCache[cacheKey]) {
+      const cachedReport = reportCache[cacheKey]
+      setReport(cachedReport)
+      setOffset(nextOffset)
+
+      const hasIssues =
+        (cachedReport?.findings?.length || 0) > 0 ||
+        (cachedReport?.warnings?.length || 0) > 0
+
+      setSuccess(hasIssues ? '' : 'Wallet analysis completed successfully.')
+      setScreen('report')
+      return
+    }
+
     setScreen('loading')
 
     try {
       const result = await analyzeWallet(desc, nextOffset, SCAN_BATCH_SIZE)
+
       setReport(result)
       setOffset(nextOffset)
+      setReportCache((prev) => ({
+        ...prev,
+        [cacheKey]: result,
+      }))
 
       const hasIssues =
         (result?.findings?.length || 0) > 0 || (result?.warnings?.length || 0) > 0
@@ -40,6 +63,7 @@ export default function App() {
   }
 
   async function handleAnalyze(desc) {
+    setReportCache({})
     await runAnalysis(desc, 0)
   }
 
@@ -59,6 +83,7 @@ export default function App() {
     setError('')
     setSuccess('')
     setOffset(0)
+    setReportCache({})
   }
 
   if (screen === 'loading') {
