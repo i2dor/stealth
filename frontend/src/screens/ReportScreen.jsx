@@ -6,8 +6,14 @@ function truncateDescriptor(desc) {
   return `${desc.slice(0, 80)}…`
 }
 
-export default function ReportScreen({ report, descriptor, success, onReset }) {
-  const { stats, findings, warnings, summary } = report
+export default function ReportScreen({
+  report,
+  descriptor,
+  success,
+  onReset,
+  onScanNext,
+}) {
+  const { stats, findings, warnings, summary, scan_window } = report
 
   return (
     <div className={styles.root}>
@@ -31,22 +37,31 @@ export default function ReportScreen({ report, descriptor, success, onReset }) {
         </div>
 
         {success && (
-  <div className={styles.successBanner}>
-    <span className={styles.successIcon}>✓</span>
-    <span>{success}</span>
-  </div>
-)}
+          <div className={styles.successBanner}>
+            <span className={styles.successIcon}>✓</span>
+            <span>{success}</span>
+          </div>
+        )}
 
+        <div className={styles.scanMeta}>
+          Scanned addresses {scan_window?.from_index ?? 0}–{scan_window?.to_index ?? 0}
+        </div>
+
+        <button className={styles.moreButton} onClick={onScanNext}>
+          Scan next 100
+        </button>
 
         <div className={styles.summaryBar}>
           <div className={`${styles.summaryCard} ${styles.vulnerable}`}>
             <div className={styles.summaryNumber}>{summary.findings}</div>
             <div className={styles.summaryLabel}>Findings</div>
           </div>
+
           <div className={`${styles.summaryCard} ${styles.warn}`}>
             <div className={styles.summaryNumber}>{summary.warnings}</div>
             <div className={styles.summaryLabel}>Warnings</div>
           </div>
+
           <div className={`${styles.summaryCard} ${styles.total}`}>
             <div className={styles.summaryNumber}>{stats.transactions_analyzed}</div>
             <div className={styles.summaryLabel}>Txs Analyzed</div>
