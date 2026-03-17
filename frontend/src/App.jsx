@@ -19,43 +19,55 @@ function dedupeByKey(items = [], getKey) {
   return Array.from(map.values())
 }
 
-function buildAggregateReport(cache, descriptor) {
-  const entries = Object.entries(cache)
-    .filter(([key]) => key.startsWith(`${descriptor}::`))
-    .sort((a, b) => {
-      const offsetA = Number(a[0].split('::')[1] || 0)
-      const offsetB = Number(b[0].split('::')[1] || 0)
-      return offsetA - offsetB
-    })
-
-  if (entries.length === 0) return null
-
-  const reports = entries.map(([, value]) => value)
-
-  const allFindings = reports.flatMap((r) => r?.findings || [])
-  const allWarnings = reports.flatMap((r) => r?.warnings || [])
+function mergeAggregateReports(prevAggregate, newReport) {
+  if (!prevAggregate) {
+    return {
+      stats: {
+        transactions_analyzed: newReport?.stats?.transactions_analyzed || 0,
+      },
+      findings: newReport?.findings || [],
+      warnings: newReport?.warnings || [],
+      summary: {
+        findings: newReport?.findings?.length || 0,
+        warnings: newReport?.warnings?.length || 0,
+        clean:
+          (newReport?.findings?.length || 0) === 0 &&
+          (newReport?.warnings?.length || 0) === 0,
+      },
+      aggregate_scan_window: {
+        from_index: newReport?.scan_window?.from_index ?? 0,
+        to_index: newReport?.scan_window?.to_index ?? 0,
+      },
+    }
+  }
 
   const findings = dedupeByKey(
-    allFindings,
+    [...(prevAggregate.findings || []), ...(newReport?.findings || [])],
     (item) =>
       item.id ||
       `${item.type || 'finding'}::${item.address || ''}::${item.txid || ''}::${item.message || ''}`
   )
 
   const warnings = dedupeByKey(
-    allWarnings,
+    [...(prevAggregate.warnings || []), ...(newReport?.warnings || [])],
     (item) =>
       item.id ||
       `${item.type || 'warning'}::${item.address || ''}::${item.txid || ''}::${item.message || ''}`
   )
 
-  const transactionsAnalyzed = reports.reduce(
-    (sum, r) => sum + (r?.stats?.transactions_analyzed || 0),
-    0
+  const transactionsAnalyzed =
+    (prevAggregate?.stats?.transactions_analyzed || 0) +
+    (newReport?.stats?.transactions_analyzed || 0)
+
+  const fromIndex = Math.min(
+    prevAggregate?.aggregate_scan_window?.from_index ?? Infinity,
+    newReport?.scan_window?.from_index ?? Infinity
   )
 
-  const firstWindow = reports[0]?.scan_window
-  const lastWindow = reports[reports.length - 1]?.scan_window
+  const toIndex = Math.max(
+    prevAggregate?.aggregate_scan_window?.to_index ?? 0,
+    newReport?.scan_window?.to_index ?? 0
+  )
 
   return {
     stats: {
@@ -69,8 +81,8 @@ function buildAggregateReport(cache, descriptor) {
       clean: findings.length === 0 && warnings.length === 0,
     },
     aggregate_scan_window: {
-      from_index: firstWindow?.from_index ?? 0,
-      to_index: lastWindow?.to_index ?? 0,
+      from_index: Number.isFinite(fromIndex) ? fromIndex : 0,
+      to_index: toIndex,
     },
   }
 }
@@ -78,31 +90,28 @@ function buildAggregateReport(cache, descriptor) {
 export default function App() {
   const [screen, setScreen] = useState('input')
   const [descriptor, setDescriptor] = useState('')
-  const [report, setReport] = useState(null)
+  const [currentReport, setCurrentReport] = useState(null)
   const [aggregateReport, setAggregateReport] = useState(null)
   const [error, setError] = useState('')
   const [success, setSuccess] = useState('')
   const [offset, setOffset] = useState(0)
   const [reportCache, setReportCache] = useState({})
 
-  async function runAnalysis(desc, nextOffset = 0) {
+  async function loadBatch(desc, nextOffset = 0, options = { extendAggregate: true }) {
     setDescriptor(desc)
     setError('')
     setSuccess('')
 
     const cacheKey = `${desc}::${nextOffset}`
+    const cachedReport = reportCache[cacheKey]
 
-    if (reportCache[cacheKey]) {
-      const cachedReport = reportCache[cacheKey]
-      const nextAggregate = buildAggregateReport(reportCache, desc)
-
-      setReport(cachedReport)
-      setAggregateReport(nextAggregate)
+    if (cachedReport) {
+      setCurrentReport(cachedReport)
       setOffset(nextOffset)
 
       const hasIssues =
-        (nextAggregate?.findings?.length || 0) > 0 ||
-        (nextAggregate?.warnings?.length || 0) > 0
+        (aggregateReport?.findings?.length || 0) > 0 ||
+        (aggregateReport?.warnings?.length || 0) > 0
 
       setSuccess(hasIssues ? '' : 'Wallet analysis completed successfully.')
       setScreen('report')
@@ -114,17 +123,22 @@ export default function App() {
     try {
       const result = await analyzeWallet(desc, nextOffset, SCAN_BATCH_SIZE)
 
-      const nextCache = {
-        ...reportCache,
+      setReportCache((prev) => ({
+        ...prev,
         [cacheKey]: result,
-      }
+      }))
 
-      const nextAggregate = buildAggregateReport(nextCache, desc)
-
-      setReport(result)
-      setAggregateReport(nextAggregate)
+      setCurrentReport(result)
       setOffset(nextOffset)
-      setReportCache(nextCache)
+
+      setAggregateReport((prevAggregate) => {
+        if (!options.extendAggregate) return prevAggregate
+        return mergeAggregateReports(prevAggregate, result)
+      })
+
+      const nextAggregate = options.extendAggregate
+        ? mergeAggregateReports(aggregateReport, result)
+        : aggregateReport
 
       const hasIssues =
         (nextAggregate?.findings?.length || 0) > 0 ||
@@ -134,7 +148,7 @@ export default function App() {
       setScreen('report')
     } catch (err) {
       console.error('Analysis failed:', err)
-      setReport(null)
+      setCurrentReport(null)
       setAggregateReport(null)
       setSuccess('')
       setError(err.message || 'Analysis failed. Please try again.')
@@ -145,22 +159,23 @@ export default function App() {
   async function handleAnalyze(desc) {
     setReportCache({})
     setAggregateReport(null)
-    await runAnalysis(desc, 0)
+    setCurrentReport(null)
+    await loadBatch(desc, 0, { extendAggregate: true })
   }
 
   async function handleScanNext() {
-    await runAnalysis(descriptor, offset + SCAN_BATCH_SIZE)
+    await loadBatch(descriptor, offset + SCAN_BATCH_SIZE, { extendAggregate: true })
   }
 
   async function handleScanPrevious() {
     const previousOffset = Math.max(0, offset - SCAN_BATCH_SIZE)
-    await runAnalysis(descriptor, previousOffset)
+    await loadBatch(descriptor, previousOffset, { extendAggregate: false })
   }
 
   function handleReset() {
     setScreen('input')
     setDescriptor('')
-    setReport(null)
+    setCurrentReport(null)
     setAggregateReport(null)
     setError('')
     setSuccess('')
@@ -175,7 +190,7 @@ export default function App() {
   if (screen === 'report') {
     return (
       <ReportScreen
-        report={report}
+        report={currentReport}
         aggregateReport={aggregateReport}
         descriptor={descriptor}
         success={success}
