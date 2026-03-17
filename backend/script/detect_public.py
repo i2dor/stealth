@@ -359,6 +359,59 @@ def build_addr_map(addresses, branch, start_index=0):
         }
     return addr_map
 
+def scan_branch(parsed, offset, count, branch):
+    debug(f"scan_branch branch={branch} offset={offset} count={count}")
+
+    addresses = derive_wpkh_addresses(
+        parsed["extpub"],
+        count,
+        branch,
+        start_index=offset,
+    )
+    addr_map = build_addr_map(addresses, branch, start_index=offset)
+
+    debug("first 5 addresses:", addresses[:5])
+
+    tx_map, addr_txs, utxos, active_addresses = collect_wallet_data(addresses)
+
+    debug("active addresses:", len(active_addresses))
+    debug("tx_map size:", len(tx_map))
+    debug("utxos size:", len(utxos))
+
+    graph = TxGraph(addr_map, tx_map, addr_txs, utxos)
+
+    findings = []
+    warnings = []
+
+    findings.extend(detect_address_reuse(graph))
+    findings.extend(detect_dust(graph))
+    findings.extend(detect_cioh(graph))
+
+    report = {
+        "scan_window": {
+            "offset": offset,
+            "count": count,
+            "from_index": offset,
+            "to_index": (offset + len(addresses) - 1) if addresses else offset,
+            "branch": branch,
+        },
+        "stats": {
+            "transactions_analyzed": len(graph.our_txids),
+            "addresses_derived": len(addresses),
+            "utxos_found": len(utxos),
+            "active_addresses": len(active_addresses),
+        },
+        "findings": findings,
+        "warnings": warnings,
+        "summary": {
+            "findings": len(findings),
+            "warnings": len(warnings),
+            "clean": len(findings) == 0 and len(warnings) == 0,
+        },
+    }
+
+    return report
+
 def main():
     try:
         if len(sys.argv) < 2:
@@ -368,52 +421,86 @@ def main():
         offset = int(sys.argv[2]) if len(sys.argv) >= 3 else 0
         count = int(sys.argv[3]) if len(sys.argv) >= 4 else 20
 
+        if offset < 0:
+            raise ValueError("offset must be >= 0")
+        if count <= 0:
+            raise ValueError("count must be > 0")
+        if count > 500:
+            raise ValueError("count must be <= 500")
+
         parsed = parse_descriptor(descriptor)
-        addresses = derive_wpkh_addresses(parsed["extpub"], count, parsed["branch"], start_index=offset)
-        addr_map = build_addr_map(addresses, parsed["branch"], start_index=offset)
-
         debug("parsed descriptor:", parsed)
-        debug("first 5 addresses:", addresses[:5])
 
-        tx_map, addr_txs, utxos, active_addresses = collect_wallet_data(addresses)
+        branches_checked = []
 
-        debug("active addresses:", len(active_addresses))
-        debug("tx_map size:", len(tx_map))
-        debug("utxos size:", len(utxos))
+        primary_branch = parsed["branch"]
+        primary_report = scan_branch(parsed, offset, count, primary_branch)
+        branches_checked.append(primary_branch)
 
-        graph = TxGraph(addr_map, tx_map, addr_txs, utxos)
+        should_fallback_to_change = (
+            primary_branch == 0 and
+            primary_report["stats"].get("active_addresses", 0) == 0 and
+            primary_report["stats"].get("transactions_analyzed", 0) == 0 and
+            primary_report["stats"].get("utxos_found", 0) == 0
+        )
 
-        findings = []
-        warnings = []
+        final_report = primary_report
 
-        findings.extend(detect_address_reuse(graph))
-        findings.extend(detect_dust(graph))
-        findings.extend(detect_cioh(graph))
+        if should_fallback_to_change:
+            debug("no activity on branch 0, trying fallback to branch 1")
+            fallback_report = scan_branch(parsed, offset, count, 1)
+            branches_checked.append(1)
 
-        report = {
-            "scan_window": {
-                "offset": offset,
-                "count": count,
-                "from_index": offset,
-                "to_index": (offset + len(addresses) - 1) if addresses else offset,
-                "branch": parsed["branch"],
-            },
-            "stats": {
-                "transactions_analyzed": len(graph.our_txids),
-                "addresses_derived": len(addresses),
-                "utxos_found": len(utxos),
-                "active_addresses": len(active_addresses),
-            },
-            "findings": findings,
-            "warnings": warnings,
-            "summary": {
-                "findings": len(findings),
-                "warnings": len(warnings),
-                "clean": len(findings) == 0 and len(warnings) == 0,
-            },
+            fallback_has_activity = (
+                fallback_report["stats"].get("active_addresses", 0) > 0 or
+                fallback_report["stats"].get("transactions_analyzed", 0) > 0 or
+                fallback_report["stats"].get("utxos_found", 0) > 0
+            )
+
+            if fallback_has_activity:
+                final_report = fallback_report
+                final_report["warnings"].append({
+                    "type": "BRANCH_FALLBACK",
+                    "severity": "LOW",
+                    "description": "No activity was found on branch 0, so the scan switched to branch 1.",
+                    "details": {
+                        "requested_branch": 0,
+                        "used_branch": 1,
+                    },
+                })
+                final_report["summary"]["warnings"] = len(final_report["warnings"])
+                final_report["summary"]["clean"] = (
+                    len(final_report["findings"]) == 0 and len(final_report["warnings"]) == 0
+                )
+            else:
+                primary_report["warnings"].append({
+                    "type": "NO_ACTIVITY_IN_SCANNED_WINDOW",
+                    "severity": "LOW",
+                    "description": "No activity was found on branch 0 or branch 1 for this scan window.",
+                    "details": {
+                        "offset": offset,
+                        "count": count,
+                        "branches_checked": branches_checked,
+                    },
+                })
+                primary_report["summary"]["warnings"] = len(primary_report["warnings"])
+                primary_report["summary"]["clean"] = (
+                    len(primary_report["findings"]) == 0 and len(primary_report["warnings"]) == 0
+                )
+                final_report = primary_report
+
+        final_report["scan_meta"] = {
+            "branches_checked": branches_checked,
+            "fallback_used": final_report["scan_window"]["branch"] != primary_branch,
+            "requested_branch": primary_branch,
+            "returned_branch": final_report["scan_window"]["branch"],
         }
 
-        print(json.dumps(report))
+        debug("final report stats:", final_report["stats"])
+        debug("final report summary:", final_report["summary"])
+        debug("final report scan_meta:", final_report["scan_meta"])
+
+        print(json.dumps(final_report))
 
     except ValueError as e:
         print(json.dumps({
@@ -428,6 +515,7 @@ def main():
                 "transactions_analyzed": 0,
                 "addresses_derived": 0,
                 "utxos_found": 0,
+                "active_addresses": 0,
             },
             "findings": [],
             "warnings": [{
@@ -440,6 +528,12 @@ def main():
                 "findings": 0,
                 "warnings": 1,
                 "clean": False,
+            },
+            "scan_meta": {
+                "branches_checked": [],
+                "fallback_used": False,
+                "requested_branch": 0,
+                "returned_branch": 0,
             },
         }))
     except Exception as e:
@@ -456,6 +550,7 @@ def main():
                 "transactions_analyzed": 0,
                 "addresses_derived": 0,
                 "utxos_found": 0,
+                "active_addresses": 0,
             },
             "findings": [],
             "warnings": [{
@@ -468,6 +563,12 @@ def main():
                 "findings": 0,
                 "warnings": 1,
                 "clean": False,
+            },
+            "scan_meta": {
+                "branches_checked": [],
+                "fallback_used": False,
+                "requested_branch": 0,
+                "returned_branch": 0,
             },
         }))
 
