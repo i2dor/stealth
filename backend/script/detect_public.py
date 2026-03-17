@@ -22,17 +22,55 @@ def satoshis(btc):
 
 
 def parse_descriptor(descriptor):
+    if descriptor is None:
+        raise ValueError("descriptor is required")
+
+    if not isinstance(descriptor, str):
+        raise ValueError("descriptor must be a string")
+
     desc = descriptor.strip()
-    desc = desc.split("#")[0]
+    if not desc:
+        raise ValueError("descriptor cannot be empty")
 
-    m = re.fullmatch(r"wpkh\(\[([0-9a-fA-F]{8})(/[^\]]+)?\]([A-Za-z0-9]+)/(0|1)/\*\)", desc)
+    if "#" in desc:
+        desc = desc.split("#", 1)[0].strip()
+
+    pattern = re.compile(
+        r"""
+        ^wpkh\(
+            \[
+                (?P<fingerprint>[0-9a-fA-F]{8})
+                (?P<origin_path>/[^\]]+)?
+            \]
+            (?P<extpub>[A-Za-z0-9]+)
+            /
+            (?P<branch>0|1)
+            /\*
+        \)$
+        """,
+        re.VERBOSE,
+    )
+
+    m = pattern.fullmatch(desc)
     if not m:
-        raise ValueError("Only descriptors of the form wpkh([fingerprint/path]xpub.../0/*) or /1/* are supported")
+        raise ValueError(
+            "unsupported descriptor format: expected wpkh([fingerprint/path]xpub.../0/*) or wpkh([fingerprint/path]xpub.../1/*)"
+        )
 
-    fingerprint = m.group(1).lower()
-    origin_path = (m.group(2) or "").lstrip("/")
-    extpub = m.group(3)
-    branch = int(m.group(4))
+    fingerprint = m.group("fingerprint").lower()
+    origin_path = (m.group("origin_path") or "").lstrip("/")
+    extpub = m.group("extpub")
+    branch = int(m.group("branch"))
+
+    if len(extpub) < 4:
+        raise ValueError("extended key is too short")
+
+    prefix = extpub[:4]
+    if prefix not in SLIP132_TO_BIP32:
+        raise ValueError(f"unsupported extended key prefix: {prefix}")
+
+    if branch not in (0, 1):
+        raise ValueError("branch must be 0 or 1")
 
     return {
         "fingerprint": fingerprint,
@@ -41,20 +79,6 @@ def parse_descriptor(descriptor):
         "branch": branch,
         "descriptor": desc,
     }
-
-
-SLIP132_TO_BIP32 = {
-    "xpub": ("0488b21e", "0488b21e"),
-    "ypub": ("049d7cb2", "0488b21e"),
-    "zpub": ("04b24746", "0488b21e"),
-    "Ypub": ("0295b43f", "0488b21e"),
-    "Zpub": ("02aa7ed3", "0488b21e"),
-    "tpub": ("043587cf", "043587cf"),
-    "upub": ("044a5262", "043587cf"),
-    "vpub": ("045f1cf6", "043587cf"),
-    "Upub": ("024289ef", "043587cf"),
-    "Vpub": ("02575483", "043587cf"),
-}
 
 
 def convert_slip132_to_bip32(extpub):
@@ -381,50 +405,88 @@ def build_addr_map(addresses, branch):
 
 
 def main():
-    if len(sys.argv) < 2:
-        fail("descriptor argument required")
+    try:
+        if len(sys.argv) < 2:
+            raise ValueError("descriptor argument required")
 
-    descriptor = sys.argv[1]
-    parsed = parse_descriptor(descriptor)
+        descriptor = sys.argv[1]
+        parsed = parse_descriptor(descriptor)
 
-    addresses = derive_wpkh_addresses(parsed["extpub"], 20, parsed["branch"])
-    addr_map = build_addr_map(addresses, parsed["branch"])
+        addresses = derive_wpkh_addresses(parsed["extpub"], 20, parsed["branch"])
+        addr_map = build_addr_map(addresses, parsed["branch"])
 
-    tx_map, addr_txs, utxos = collect_wallet_data(addresses)
-    graph = TxGraph(addr_map, tx_map, addr_txs, utxos)
+        tx_map, addr_txs, utxos = collect_wallet_data(addresses)
+        graph = TxGraph(addr_map, tx_map, addr_txs, utxos)
 
-    findings = []
-    warnings = []
+        findings = []
+        warnings = []
 
-    findings.extend(detect_address_reuse(graph))
-    findings.extend(detect_dust(graph))
-    findings.extend(detect_cioh(graph))
-    findings.extend(detect_consolidation(graph))
-    age_findings, age_warnings = detect_utxo_age_spread(graph)
-    findings.extend(age_findings)
-    warnings.extend(age_warnings)
+        findings.extend(detect_address_reuse(graph))
+        findings.extend(detect_dust(graph))
+        findings.extend(detect_cioh(graph))
+        findings.extend(detect_consolidation(graph))
+        age_findings, age_warnings = detect_utxo_age_spread(graph)
+        findings.extend(age_findings)
+        warnings.extend(age_warnings)
 
-    report = {
-        "stats": {
-            "transactions_analyzed": len(graph.our_txids),
-            "addresses_derived": len(addresses),
-            "utxos_found": len(utxos),
-        },
-        "debug": {
-            "first_addresses": addresses[:10]
-        },
-        "findings": findings,
-        "warnings": warnings,
-        "summary": {
-            "findings": len(findings),
-            "warnings": len(warnings),
-            "clean": len(findings) == 0 and len(warnings) == 0,
-        },
-    }
+        report = {
+            "stats": {
+                "transactions_analyzed": len(graph.our_txids),
+                "addresses_derived": len(addresses),
+                "utxos_found": len(utxos),
+            },
+            "findings": findings,
+            "warnings": warnings,
+            "summary": {
+                "findings": len(findings),
+                "warnings": len(warnings),
+                "clean": len(findings) == 0 and len(warnings) == 0,
+            },
+        }
 
-    print(json.dumps(report))
+        print(json.dumps(report))
 
+    except ValueError as e:
+        error_report = {
+            "stats": {
+                "transactions_analyzed": 0,
+                "addresses_derived": 0,
+                "utxos_found": 0,
+            },
+            "findings": [],
+            "warnings": [
+                {
+                    "type": "INVALID_INPUT",
+                    "severity": "HIGH",
+                    "description": str(e),
+                    "correction": "Check the descriptor format and try again.",
+                }
+            ],
+            "summary": {
+                "findings": 0,
+                "warnings": 1,
+                "clean": False,
+            },
+        }
 
+        print(json.dumps(error_report))
 
-if __name__ == "__main__":
-    main()
+    except Exception as e:
+        error_report = {
+            "stats": {
+                "transactions_analyzed": 0,
+                "addresses_derived": 0,
+                "utxos_found": 0,
+            },
+            "findings": [],
+            "warnings": [
+                {
+                    "type": "INTERNAL_ERROR",
+                    "severity": "HIGH",
+                    "description": str(e),
+                    "correction": "Try again later or inspect the server logs.",
+                }
+            ],
+            "summary": {
+                "findings": 0,
+                "warnings": 1,
