@@ -24,6 +24,12 @@ public class WalletResource {
         @DefaultValue("0") @QueryParam("offset") int offset,
         @DefaultValue("20") @QueryParam("count") int count
     ) {
+        System.out.println("=== /api/wallet/scan ===");
+        System.out.println("descriptor: " + descriptor);
+        System.out.println("offset: " + offset);
+        System.out.println("count: " + count);
+        System.out.println("detectScript: " + detectScript);
+
         if (descriptor == null || descriptor.isBlank()) {
             return Response.status(Response.Status.BAD_REQUEST)
                 .entity(Map.of("error", "descriptor query parameter is required"))
@@ -56,12 +62,17 @@ public class WalletResource {
                 String.valueOf(offset),
                 String.valueOf(count)
             );
+
             pb.redirectErrorStream(false);
             Process process = pb.start();
 
             String output = new String(process.getInputStream().readAllBytes());
             String stderr = new String(process.getErrorStream().readAllBytes());
             int exitCode = process.waitFor();
+
+            System.out.println("python exitCode: " + exitCode);
+            System.out.println("python stdout: " + output);
+            System.out.println("python stderr: " + stderr);
 
             if (exitCode != 0 || output.isBlank()) {
                 return Response.status(Response.Status.INTERNAL_SERVER_ERROR)
@@ -71,6 +82,8 @@ public class WalletResource {
 
             return Response.ok(output).type(MediaType.APPLICATION_JSON).build();
         } catch (Exception e) {
+            e.printStackTrace();
+
             return Response.status(Response.Status.INTERNAL_SERVER_ERROR)
                 .entity(Map.of("error", e.getMessage()))
                 .build();
