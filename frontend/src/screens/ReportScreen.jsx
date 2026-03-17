@@ -12,8 +12,12 @@ export default function ReportScreen({
   success,
   onReset,
   onScanNext,
+  onScanPrevious,
 }) {
   const { stats, findings, warnings, summary, scan_window } = report
+  const fromIndex = scan_window?.from_index ?? 0
+  const toIndex = scan_window?.to_index ?? 0
+  const isFirstBatch = fromIndex <= 0
 
   return (
     <div className={styles.root}>
@@ -44,12 +48,25 @@ export default function ReportScreen({
         )}
 
         <div className={styles.scanMeta}>
-          Scanned addresses {scan_window?.from_index ?? 0}–{scan_window?.to_index ?? 0}
+          Scanned addresses {fromIndex}–{toIndex}
         </div>
 
-        <button className={styles.moreButton} onClick={onScanNext}>
-          Scan next 100
-        </button>
+        <div className={styles.paginationRow}>
+          <button
+            className={styles.moreButton}
+            onClick={onScanPrevious}
+            disabled={isFirstBatch}
+          >
+            Previous 100
+          </button>
+
+          <button
+            className={styles.moreButton}
+            onClick={onScanNext}
+          >
+            Scan next 100
+          </button>
+        </div>
 
         <div className={styles.summaryBar}>
           <div className={`${styles.summaryCard} ${styles.vulnerable}`}>
