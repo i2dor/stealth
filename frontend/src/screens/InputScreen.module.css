@@ -67,7 +67,7 @@
   line-height: 1.6;
   padding: 14px 16px;
   resize: vertical;
-  transition: border-color var(--transition);
+  transition: border-color var(--transition), box-shadow var(--transition);
   display: block;
 }
 
@@ -127,14 +127,28 @@
   border: 1px solid var(--border);
   color: var(--text-dim);
 }
-.errorBox {
+
+/* Alerts */
+.errorBox,
+.successBox {
   margin-top: 12px;
   padding: 12px 14px;
   border-radius: 12px;
-  border: 1px solid rgba(255, 90, 90, 0.35);
-  background: rgba(255, 90, 90, 0.08);
-  color: #ff8f8f;
   font-size: 14px;
-  line-height: 1.5;
+  line-height: 1.55;
+  font-weight: 500;
+  border: 1px solid;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
 }
 
+.errorBox {
+  border-color: rgba(255, 90, 90, 0.35);
+  background: rgba(255, 90, 90, 0.08);
+  color: #ff9a9a;
+}
+
+.successBox {
+  border-color: rgba(0, 230, 180, 0.28);
+  background: rgba(0, 230, 180, 0.08);
+  color: #8ff7da;
+}
