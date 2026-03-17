@@ -8,15 +8,26 @@ function truncateDescriptor(desc) {
 
 export default function ReportScreen({
   report,
+  aggregateReport,
   descriptor,
   success,
   onReset,
   onScanNext,
   onScanPrevious,
 }) {
-  const { stats, findings, warnings, summary, scan_window } = report
-  const fromIndex = scan_window?.from_index ?? 0
-  const toIndex = scan_window?.to_index ?? 0
+  const currentWindow = report?.scan_window || {}
+  const aggregate = aggregateReport || report || {}
+
+  const stats = aggregate?.stats || {}
+  const findings = aggregate?.findings || []
+  const warnings = aggregate?.warnings || []
+  const summary = aggregate?.summary || {}
+  const aggregateWindow = aggregate?.aggregate_scan_window || {}
+
+  const fromIndex = currentWindow?.from_index ?? 0
+  const toIndex = currentWindow?.to_index ?? 0
+  const totalFrom = aggregateWindow?.from_index ?? fromIndex
+  const totalTo = aggregateWindow?.to_index ?? toIndex
   const isFirstBatch = fromIndex <= 0
 
   return (
@@ -48,7 +59,11 @@ export default function ReportScreen({
         )}
 
         <div className={styles.scanMeta}>
-          Scanned addresses {fromIndex}–{toIndex}
+          Current batch: {fromIndex}–{toIndex}
+        </div>
+
+        <div className={styles.scanMeta}>
+          Total scanned so far: {totalFrom}–{totalTo}
         </div>
 
         <div className={styles.paginationRow}>
@@ -70,17 +85,19 @@ export default function ReportScreen({
 
         <div className={styles.summaryBar}>
           <div className={`${styles.summaryCard} ${styles.vulnerable}`}>
-            <div className={styles.summaryNumber}>{summary.findings}</div>
+            <div className={styles.summaryNumber}>{summary.findings || 0}</div>
             <div className={styles.summaryLabel}>Findings</div>
           </div>
 
           <div className={`${styles.summaryCard} ${styles.warn}`}>
-            <div className={styles.summaryNumber}>{summary.warnings}</div>
+            <div className={styles.summaryNumber}>{summary.warnings || 0}</div>
             <div className={styles.summaryLabel}>Warnings</div>
           </div>
 
           <div className={`${styles.summaryCard} ${styles.total}`}>
-            <div className={styles.summaryNumber}>{stats.transactions_analyzed}</div>
+            <div className={styles.summaryNumber}>
+              {stats.transactions_analyzed || 0}
+            </div>
             <div className={styles.summaryLabel}>Txs Analyzed</div>
           </div>
         </div>
@@ -94,11 +111,11 @@ export default function ReportScreen({
         {findings.length > 0 && (
           <>
             <div className={styles.listHeader}>
-              <span className={styles.listTitle}>Findings</span>
+              <span className={styles.listTitle}>All Findings So Far</span>
             </div>
             <div className={styles.findingList}>
               {findings.map((f, i) => (
-                <FindingCard key={i} finding={f} />
+                <FindingCard key={f.id || `${f.type || 'f'}-${i}`} finding={f} />
               ))}
             </div>
           </>
@@ -107,11 +124,11 @@ export default function ReportScreen({
         {warnings.length > 0 && (
           <>
             <div className={styles.listHeader} style={{ marginTop: 28 }}>
-              <span className={styles.listTitle}>Warnings</span>
+              <span className={styles.listTitle}>All Warnings So Far</span>
             </div>
             <div className={styles.findingList}>
               {warnings.map((w, i) => (
-                <FindingCard key={i} finding={w} />
+                <FindingCard key={w.id || `${w.type || 'w'}-${i}`} finding={w} />
               ))}
             </div>
           </>
