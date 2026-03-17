@@ -47,6 +47,11 @@ export default function App() {
     await runAnalysis(descriptor, offset + SCAN_BATCH_SIZE)
   }
 
+  async function handleScanPrevious() {
+    const previousOffset = Math.max(0, offset - SCAN_BATCH_SIZE)
+    await runAnalysis(descriptor, previousOffset)
+  }
+
   function handleReset() {
     setScreen('input')
     setDescriptor('')
@@ -68,6 +73,7 @@ export default function App() {
         success={success}
         onReset={handleReset}
         onScanNext={handleScanNext}
+        onScanPrevious={handleScanPrevious}
       />
     )
   }
