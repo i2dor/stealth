@@ -1,11 +1,9 @@
-const API_BASE = 'https://stealth-backend-lv38.onrender.com'
+const API_BASE = import.meta.env.VITE_API_BASE
 
 export const analyzeWallet = async (descriptor) => {
   const url = `${API_BASE}/api/wallet/scan?descriptor=${encodeURIComponent(descriptor)}`
   const res = await fetch(url)
   const text = await res.text()
-
-  console.log('raw response text:', text)
 
   if (!res.ok) {
     throw new Error(`Analysis failed: ${text}`)
