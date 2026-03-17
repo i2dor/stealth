@@ -9,19 +9,23 @@ export default function App() {
   const [descriptor, setDescriptor] = useState('')
   const [report, setReport] = useState(null)
   const [error, setError] = useState('')
+  const [success, setSuccess] = useState('')
 
   async function handleAnalyze(desc) {
     setDescriptor(desc)
     setError('')
+    setSuccess('')
     setScreen('loading')
 
     try {
       const result = await analyzeWallet(desc)
       setReport(result)
+      setSuccess('Wallet analysis completed successfully.')
       setScreen('report')
     } catch (err) {
       console.error('Analysis failed:', err)
       setReport(null)
+      setSuccess('')
       setError(err.message || 'Analysis failed. Please try again.')
       setScreen('input')
     }
@@ -32,6 +36,7 @@ export default function App() {
     setDescriptor('')
     setReport(null)
     setError('')
+    setSuccess('')
   }
 
   if (screen === 'loading') {
@@ -43,10 +48,16 @@ export default function App() {
       <ReportScreen
         report={report}
         descriptor={descriptor}
+        success={success}
         onReset={handleReset}
       />
     )
   }
 
-  return <InputScreen onAnalyze={handleAnalyze} error={error} />
+  return (
+    <InputScreen
+      onAnalyze={handleAnalyze}
+      error={error}
+    />
+  )
 }
