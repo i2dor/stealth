@@ -18,17 +18,21 @@ export default function App() {
     setScreen('loading')
 
     try {
-      const result = await analyzeWallet(desc)
-      setReport(result)
-      setSuccess('Wallet analysis completed successfully.')
-      setScreen('report')
-    } catch (err) {
-      console.error('Analysis failed:', err)
-      setReport(null)
-      setSuccess('')
-      setError(err.message || 'Analysis failed. Please try again.')
-      setScreen('input')
-    }
+  const result = await analyzeWallet(desc)
+  setReport(result)
+
+  const hasIssues =
+    (result?.findings?.length || 0) > 0 || (result?.warnings?.length || 0) > 0
+
+  setSuccess(hasIssues ? '' : 'Wallet analysis completed successfully.')
+  setScreen('report')
+} catch (err) {
+  console.error('Analysis failed:', err)
+  setReport(null)
+  setSuccess('')
+  setError(err.message || 'Analysis failed. Please try again.')
+  setScreen('input')
+}
   }
 
   function handleReset() {
