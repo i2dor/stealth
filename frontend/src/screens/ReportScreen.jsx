@@ -30,7 +30,13 @@ export default function ReportScreen({ report, descriptor, success, onReset }) {
           </div>
         </div>
 
-        {success && <div className={styles.successBanner}>{success}</div>}
+        {success && (
+  <div className={styles.successBanner}>
+    <span className={styles.successIcon}>✓</span>
+    <span>{success}</span>
+  </div>
+)}
+
 
         <div className={styles.summaryBar}>
           <div className={`${styles.summaryCard} ${styles.vulnerable}`}>
