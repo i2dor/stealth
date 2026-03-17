@@ -38,10 +38,12 @@ def parse_descriptor(descriptor):
     pattern = re.compile(
         r"""
         ^wpkh\(
-            \[
-                (?P<fingerprint>[0-9a-fA-F]{8})
-                (?P<origin_path>/[^\]]+)?
-            \]
+            (?:
+                \[
+                    (?P<fingerprint>[0-9a-fA-F]{8})
+                    (?P<origin_path>/[^\]]+)?
+                \]
+            )?
             (?P<extpub>[A-Za-z0-9]+)
             /
             (?P<branch>0|1)
@@ -54,13 +56,21 @@ def parse_descriptor(descriptor):
     m = pattern.fullmatch(desc)
     if not m:
         raise ValueError(
-            "unsupported descriptor format: expected wpkh([fingerprint/path]xpub.../0/*) or wpkh([fingerprint/path]xpub.../1/*)"
+            "unsupported descriptor format: expected wpkh([fingerprint/path]xpub.../0/*), wpkh([fingerprint/path]xpub.../1/*), wpkh(xpub.../0/*), or wpkh(xpub.../1/*)"
         )
 
-    fingerprint = m.group("fingerprint").lower()
-    origin_path = (m.group("origin_path") or "").lstrip("/")
+    fingerprint = m.group("fingerprint")
+    origin_path = m.group("origin_path")
     extpub = m.group("extpub")
     branch = int(m.group("branch"))
+
+    if fingerprint is not None:
+        fingerprint = fingerprint.lower()
+
+    if origin_path is not None:
+        origin_path = origin_path.lstrip("/")
+    else:
+        origin_path = ""
 
     if len(extpub) < 4:
         raise ValueError("extended key is too short")
@@ -79,6 +89,7 @@ def parse_descriptor(descriptor):
         "branch": branch,
         "descriptor": desc,
     }
+
 
 
 def convert_slip132_to_bip32(extpub):
