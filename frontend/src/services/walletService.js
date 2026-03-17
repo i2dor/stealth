@@ -1,5 +1,8 @@
+const API_BASE = 'https://stealth-backend-lv38.onrender.com'
+
 export const analyzeWallet = async (descriptor) => {
-  const res = await fetch(`/api/wallet/scan?descriptor=${encodeURIComponent(descriptor)}`)
+  const url = `${API_BASE}/api/wallet/scan?descriptor=${encodeURIComponent(descriptor)}`
+  const res = await fetch(url)
   const text = await res.text()
 
   console.log('raw response text:', text)
