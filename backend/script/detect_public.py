@@ -129,14 +129,14 @@ def xpub_net_and_key(extpub):
     return "mainnet" if mainnet else "testnet"
 
 
-def derive_wpkh_addresses(extpub, count, branch):
+def derive_wpkh_addresses(extpub, count, branch, start_index=0):
     net = xpub_net_and_key(extpub)
     bip32_key = convert_slip132_to_bip32(extpub)
     account_ctx = Bip32Secp256k1.FromExtendedKey(bip32_key)
     branch_ctx = account_ctx.ChildKey(branch)
 
     addrs = []
-    for i in range(count):
+    for i in range(start_index, start_index + count):
         child = branch_ctx.ChildKey(i)
         pubkey_bytes = child.PublicKey().RawCompressed().ToBytes()
         hrp = (
@@ -432,9 +432,9 @@ def detect_utxo_age_spread(g):
     return findings, warnings
 
 
-def build_addr_map(addresses, branch):
+def build_addr_map(addresses, branch, start_index=0):
     addr_map = {}
-    for i, addr in enumerate(addresses):
+    for i, addr in enumerate(addresses, start=start_index):
         addr_map[addr] = {
             "type": "p2wpkh",
             "internal": branch == 1,
@@ -449,10 +449,38 @@ def main():
             raise ValueError("descriptor argument required")
 
         descriptor = sys.argv[1]
+
+        offset = 0
+        count = 20
+
+        if len(sys.argv) >= 3:
+            offset = int(sys.argv[2])
+
+        if len(sys.argv) >= 4:
+            count = int(sys.argv[3])
+
+        if offset < 0:
+            raise ValueError("offset must be >= 0")
+
+        if count <= 0:
+            raise ValueError("count must be > 0")
+
+        if count > 500:
+            raise ValueError("count must be <= 500")
+
         parsed = parse_descriptor(descriptor)
 
-        addresses = derive_wpkh_addresses(parsed["extpub"], 20, parsed["branch"])
-        addr_map = build_addr_map(addresses, parsed["branch"])
+        addresses = derive_wpkh_addresses(
+            parsed["extpub"],
+            count,
+            parsed["branch"],
+            start_index=offset,
+        )
+        addr_map = build_addr_map(
+            addresses,
+            parsed["branch"],
+            start_index=offset,
+        )
 
         tx_map, addr_txs, utxos = collect_wallet_data(addresses)
         graph = TxGraph(addr_map, tx_map, addr_txs, utxos)
@@ -469,6 +497,13 @@ def main():
         warnings.extend(age_warnings)
 
         report = {
+            "scan_window": {
+                "offset": offset,
+                "count": count,
+                "from_index": offset,
+                "to_index": (offset + len(addresses) - 1) if addresses else offset,
+                "branch": parsed["branch"],
+            },
             "stats": {
                 "transactions_analyzed": len(graph.our_txids),
                 "addresses_derived": len(addresses),
@@ -487,6 +522,13 @@ def main():
 
     except ValueError as e:
         error_report = {
+            "scan_window": {
+                "offset": 0,
+                "count": 0,
+                "from_index": 0,
+                "to_index": 0,
+                "branch": 0,
+            },
             "stats": {
                 "transactions_analyzed": 0,
                 "addresses_derived": 0,
@@ -512,6 +554,13 @@ def main():
 
     except Exception as e:
         error_report = {
+            "scan_window": {
+                "offset": 0,
+                "count": 0,
+                "from_index": 0,
+                "to_index": 0,
+                "branch": 0,
+            },
             "stats": {
                 "transactions_analyzed": 0,
                 "addresses_derived": 0,
