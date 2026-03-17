@@ -387,56 +387,38 @@ def main():
     descriptor = sys.argv[1]
     parsed = parse_descriptor(descriptor)
 
-    target = "bc1q5r8m2vut9p0hdzlnrr3razqy99wheejkralstf"
-    extpub = parsed["extpub"]
-    bip32_key = convert_slip132_to_bip32(extpub)
-    net = xpub_net_and_key(extpub)
+    addresses = derive_wpkh_addresses(parsed["extpub"], 20, parsed["branch"])
+    addr_map = build_addr_map(addresses, parsed["branch"])
 
-    def make_addr(ctx):
-        pubkey_bytes = ctx.PublicKey().RawCompressed().ToBytes()
-        hrp = (
-            CoinsConf.BitcoinMainNet.ParamByKey("p2wpkh_hrp")
-            if net == "mainnet"
-            else CoinsConf.BitcoinTestNet.ParamByKey("p2wpkh_hrp")
-        )
-        return P2WPKHAddrEncoder.EncodeKey(pubkey_bytes, hrp=hrp)
+    tx_map, addr_txs, utxos = collect_wallet_data(addresses)
+    graph = TxGraph(addr_map, tx_map, addr_txs, utxos)
 
-    root = Bip32Secp256k1.FromExtendedKey(bip32_key)
+    findings = []
+    warnings = []
 
-    candidates = {}
-
-    try:
-        candidates["root/0..9"] = [make_addr(root.ChildKey(i)) for i in range(10)]
-    except Exception:
-        candidates["root/0..9"] = []
-
-    for branch in [0, 1]:
-        try:
-            branch_ctx = root.ChildKey(branch)
-            candidates[f"branch-{branch}/0..9"] = [make_addr(branch_ctx.ChildKey(i)) for i in range(10)]
-        except Exception:
-            candidates[f"branch-{branch}/0..9"] = []
+    findings.extend(detect_address_reuse(graph))
+    findings.extend(detect_dust(graph))
+    findings.extend(detect_cioh(graph))
+    findings.extend(detect_consolidation(graph))
+    age_findings, age_warnings = detect_utxo_age_spread(graph)
+    findings.extend(age_findings)
+    warnings.extend(age_warnings)
 
     report = {
-        "debug": {
-            "target_address": target,
-            "matches": {
-                name: (target in addrs)
-                for name, addrs in candidates.items()
-            },
-            "candidates": candidates,
-        },
         "stats": {
-            "transactions_analyzed": 0,
-            "addresses_derived": 0,
-            "utxos_found": 0,
+            "transactions_analyzed": len(graph.our_txids),
+            "addresses_derived": len(addresses),
+            "utxos_found": len(utxos),
         },
-        "findings": [],
-        "warnings": [],
+        "debug": {
+            "first_addresses": addresses[:10]
+        },
+        "findings": findings,
+        "warnings": warnings,
         "summary": {
-            "findings": 0,
-            "warnings": 0,
-            "clean": True,
+            "findings": len(findings),
+            "warnings": len(warnings),
+            "clean": len(findings) == 0 and len(warnings) == 0,
         },
     }
 
