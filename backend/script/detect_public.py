@@ -8,9 +8,7 @@ from collections import defaultdict
 import requests
 from bip_utils import Bip32Secp256k1, P2WPKHAddrEncoder, CoinsConf
 
-
 API_BASE = "https://blockstream.info/api"
-
 
 SLIP132_TO_BIP32 = {
     "xpub": ("0488b21e", "0488b21e"),
@@ -25,24 +23,17 @@ SLIP132_TO_BIP32 = {
     "Vpub": ("02575483", "043587cf"),
 }
 
+session = requests.Session()
 
 def debug(*args):
     print(*args, file=sys.stderr)
 
-
-def fail(msg, code=1):
-    print(msg, file=sys.stderr)
-    sys.exit(code)
-
-
 def satoshis(btc):
     return int(round(float(btc) * 100_000_000))
-
 
 def parse_descriptor(descriptor):
     if descriptor is None:
         raise ValueError("descriptor is required")
-
     if not isinstance(descriptor, str):
         raise ValueError("descriptor must be a string")
 
@@ -91,15 +82,9 @@ def parse_descriptor(descriptor):
     else:
         origin_path = ""
 
-    if len(extpub) < 4:
-        raise ValueError("extended key is too short")
-
     prefix = extpub[:4]
     if prefix not in SLIP132_TO_BIP32:
         raise ValueError(f"unsupported extended key prefix: {prefix}")
-
-    if branch not in (0, 1):
-        raise ValueError("branch must be 0 or 1")
 
     return {
         "fingerprint": fingerprint,
@@ -109,20 +94,14 @@ def parse_descriptor(descriptor):
         "descriptor": desc,
     }
 
-
 def convert_slip132_to_bip32(extpub):
     prefix = extpub[:4]
-    if prefix not in SLIP132_TO_BIP32:
-        raise ValueError(f"Unsupported extended pub prefix: {prefix}")
-
     src_hex, dst_hex = SLIP132_TO_BIP32[prefix]
     raw = base58.b58decode_check(extpub)
     if raw[:4].hex() != src_hex:
         raise ValueError(f"Unexpected version bytes for {prefix}")
-
     converted = bytes.fromhex(dst_hex) + raw[4:]
     return base58.b58encode_check(converted).decode()
-
 
 def xpub_net_and_key(extpub):
     prefix = extpub[:4]
@@ -131,7 +110,6 @@ def xpub_net_and_key(extpub):
     if not (mainnet or testnet):
         raise ValueError(f"Unsupported extended pub prefix: {prefix}")
     return "mainnet" if mainnet else "testnet"
-
 
 def derive_wpkh_addresses(extpub, count, branch, start_index=0):
     net = xpub_net_and_key(extpub)
@@ -153,18 +131,14 @@ def derive_wpkh_addresses(extpub, count, branch, start_index=0):
 
     return addrs
 
-
 def api_get(path):
     url = f"{API_BASE}{path}"
-    debug("GET", url)
-    r = requests.get(url, timeout=(5, 10))
+    r = session.get(url, timeout=(5, 10))
     r.raise_for_status()
     return r.json()
 
-
 def address_stats(address):
     return api_get(f"/address/{address}")
-
 
 def address_txs(address):
     txs = []
@@ -180,10 +154,8 @@ def address_txs(address):
 
     return txs
 
-
 def address_utxos(address):
     return api_get(f"/address/{address}/utxo")
-
 
 def normalize_script_type(scriptpubkey_type):
     mapping = {
@@ -196,52 +168,38 @@ def normalize_script_type(scriptpubkey_type):
     }
     return mapping.get(scriptpubkey_type, scriptpubkey_type or "unknown")
 
-
 def collect_wallet_data(addresses):
     tx_map = {}
     addr_txs = defaultdict(list)
     utxos = []
-    address_activity = {}
+    active_addresses = []
 
     for addr in addresses:
-        stats = {}
         try:
             stats = address_stats(addr)
         except Exception as e:
             debug(f"stats error for {addr}: {e}")
+            continue
 
         chain_stats = stats.get("chain_stats", {}) or {}
         mempool_stats = stats.get("mempool_stats", {}) or {}
 
+        tx_count = chain_stats.get("tx_count", 0) + mempool_stats.get("tx_count", 0)
         funded_count = chain_stats.get("funded_txo_count", 0) + mempool_stats.get("funded_txo_count", 0)
         spent_count = chain_stats.get("spent_txo_count", 0) + mempool_stats.get("spent_txo_count", 0)
-        tx_count = chain_stats.get("tx_count", 0) + mempool_stats.get("tx_count", 0)
-        funded_sum = chain_stats.get("funded_txo_sum", 0) + mempool_stats.get("funded_txo_sum", 0)
-        spent_sum = chain_stats.get("spent_txo_sum", 0) + mempool_stats.get("spent_txo_sum", 0)
 
-        address_activity[addr] = {
-            "funded_count": funded_count,
-            "spent_count": spent_count,
-            "tx_count": tx_count,
-            "funded_sum": funded_sum,
-            "spent_sum": spent_sum,
-        }
+        debug(f"address={addr} tx_count={tx_count} funded={funded_count} spent={spent_count}")
 
-        debug(
-            f"address={addr} "
-            f"tx_count={tx_count} funded_count={funded_count} spent_count={spent_count} "
-            f"funded_sum={funded_sum} spent_sum={spent_sum}"
-        )
+        if tx_count == 0 and funded_count == 0 and spent_count == 0:
+            continue
 
-        txs = []
-        if tx_count > 0 or funded_count > 0 or spent_count > 0:
-            try:
-                txs = address_txs(addr)
-            except Exception as e:
-                debug(f"tx error for {addr}: {e}")
-                txs = []
-        else:
-            debug(f"skip tx history for unused address {addr}")
+        active_addresses.append(addr)
+
+        try:
+            txs = address_txs(addr)
+        except Exception as e:
+            debug(f"tx error for {addr}: {e}")
+            txs = []
 
         for tx in txs:
             txid = tx["txid"]
@@ -287,8 +245,6 @@ def collect_wallet_data(addresses):
             debug(f"utxo error for {addr}: {e}")
             addr_unspent = []
 
-        debug(f"address={addr} utxos={len(addr_unspent)}")
-
         for u in addr_unspent:
             status = u.get("status", {}) or {}
             utxos.append({
@@ -300,8 +256,7 @@ def collect_wallet_data(addresses):
                 "blockheight": status.get("block_height", 0),
             })
 
-    return tx_map, addr_txs, utxos, address_activity
-
+    return tx_map, addr_txs, utxos, active_addresses
 
 class TxGraph:
     def __init__(self, addr_map, tx_map, addr_txs, utxos):
@@ -318,12 +273,6 @@ class TxGraph:
     def is_ours(self, address):
         return address in self.our_addrs
 
-    def get_script_type(self, address):
-        meta = self.addr_map.get(address)
-        if meta:
-            return meta["type"]
-        return "unknown"
-
     def get_input_addresses(self, txid):
         tx = self.fetch_tx(txid)
         if not tx:
@@ -338,21 +287,6 @@ class TxGraph:
                 "vout": vin.get("vout", 0),
             })
         return addrs
-
-    def get_output_addresses(self, txid):
-        tx = self.fetch_tx(txid)
-        if not tx:
-            return []
-        outs = []
-        for vout in tx.get("vout", []):
-            outs.append({
-                "address": vout.get("scriptpubkey_address", ""),
-                "value": vout.get("value", 0) / 100_000_000,
-                "n": vout.get("n", 0),
-                "type": normalize_script_type(vout.get("scriptpubkey_type", "unknown")),
-            })
-        return outs
-
 
 def detect_address_reuse(g):
     findings = []
@@ -375,7 +309,6 @@ def detect_address_reuse(g):
             })
     return findings
 
-
 def detect_dust(g):
     findings = []
     for u in g.utxos:
@@ -394,7 +327,6 @@ def detect_dust(g):
                 "correction": "Avoid spending dust with normal inputs.",
             })
     return findings
-
 
 def detect_cioh(g):
     findings = []
@@ -417,68 +349,6 @@ def detect_cioh(g):
             })
     return findings
 
-
-def detect_consolidation(g):
-    findings = []
-    for u in g.utxos:
-        tx = g.fetch_tx(u["txid"])
-        if not tx:
-            continue
-        n_in = len(tx.get("vin", []))
-        n_out = len(tx.get("vout", []))
-        if n_in >= 3 and n_out <= 2:
-            findings.append({
-                "type": "CONSOLIDATION",
-                "severity": "MEDIUM",
-                "description": f"UTXO {u['txid']}:{u['vout']} born from a {n_in}-input consolidation",
-                "details": {
-                    "txid": u["txid"],
-                    "vout": u["vout"],
-                    "amount_btc": round(u["amount"], 8),
-                    "consolidation_inputs": n_in,
-                    "consolidation_outputs": n_out,
-                },
-                "correction": "Avoid consolidating many UTXOs into one transaction.",
-            })
-    return findings
-
-
-def detect_utxo_age_spread(g):
-    our_utxos = [u for u in g.utxos if g.is_ours(u.get("address", ""))]
-    if len(our_utxos) < 2:
-        return [], []
-
-    confs = sorted([u.get("confirmations", 0) for u in our_utxos])
-    spread = confs[-1] - confs[0]
-
-    findings = []
-    warnings = []
-
-    if spread >= 10:
-        findings.append({
-            "type": "UTXO_AGE_SPREAD",
-            "severity": "LOW",
-            "description": f"UTXO age spread of {spread} confirmation buckets",
-            "details": {
-                "spread": spread,
-            },
-            "correction": "Consider more consistent coin selection.",
-        })
-
-    old_count = len([u for u in our_utxos if u.get("confirmations", 0) >= 1])
-    if old_count:
-        warnings.append({
-            "type": "DORMANT_UTXOS",
-            "severity": "LOW",
-            "description": f"{old_count} UTXO(s) appear dormant",
-            "details": {
-                "count": old_count,
-            },
-        })
-
-    return findings, warnings
-
-
 def build_addr_map(addresses, branch, start_index=0):
     addr_map = {}
     for i, addr in enumerate(addresses, start=start_index):
@@ -489,58 +359,27 @@ def build_addr_map(addresses, branch, start_index=0):
         }
     return addr_map
 
-
 def main():
     try:
-        debug("=== detect_public.py start ===")
-        debug("argv:", sys.argv)
-
         if len(sys.argv) < 2:
             raise ValueError("descriptor argument required")
 
         descriptor = sys.argv[1]
-
-        offset = 0
-        count = 20
-
-        if len(sys.argv) >= 3:
-            offset = int(sys.argv[2])
-
-        if len(sys.argv) >= 4:
-            count = int(sys.argv[3])
-
-        if offset < 0:
-            raise ValueError("offset must be >= 0")
-
-        if count <= 0:
-            raise ValueError("count must be > 0")
-
-        if count > 500:
-            raise ValueError("count must be <= 500")
+        offset = int(sys.argv[2]) if len(sys.argv) >= 3 else 0
+        count = int(sys.argv[3]) if len(sys.argv) >= 4 else 20
 
         parsed = parse_descriptor(descriptor)
-        debug("parsed descriptor:", parsed)
+        addresses = derive_wpkh_addresses(parsed["extpub"], count, parsed["branch"], start_index=offset)
+        addr_map = build_addr_map(addresses, parsed["branch"], start_index=offset)
 
-        addresses = derive_wpkh_addresses(
-            parsed["extpub"],
-            count,
-            parsed["branch"],
-            start_index=offset,
-        )
-        debug(f"derived {len(addresses)} addresses")
+        debug("parsed descriptor:", parsed)
         debug("first 5 addresses:", addresses[:5])
 
-        addr_map = build_addr_map(
-            addresses,
-            parsed["branch"],
-            start_index=offset,
-        )
+        tx_map, addr_txs, utxos, active_addresses = collect_wallet_data(addresses)
 
-        tx_map, addr_txs, utxos, address_activity = collect_wallet_data(addresses)
-
-        debug(f"tx_map size: {len(tx_map)}")
-        debug(f"utxos size: {len(utxos)}")
-        debug(f"active addresses: {len([a for a, meta in address_activity.items() if meta.get('tx_count', 0) > 0 or meta.get('funded_count', 0) > 0 or meta.get('spent_count', 0) > 0])}")
+        debug("active addresses:", len(active_addresses))
+        debug("tx_map size:", len(tx_map))
+        debug("utxos size:", len(utxos))
 
         graph = TxGraph(addr_map, tx_map, addr_txs, utxos)
 
@@ -550,10 +389,6 @@ def main():
         findings.extend(detect_address_reuse(graph))
         findings.extend(detect_dust(graph))
         findings.extend(detect_cioh(graph))
-        findings.extend(detect_consolidation(graph))
-        age_findings, age_warnings = detect_utxo_age_spread(graph)
-        findings.extend(age_findings)
-        warnings.extend(age_warnings)
 
         report = {
             "scan_window": {
@@ -567,6 +402,7 @@ def main():
                 "transactions_analyzed": len(graph.our_txids),
                 "addresses_derived": len(addresses),
                 "utxos_found": len(utxos),
+                "active_addresses": len(active_addresses),
             },
             "findings": findings,
             "warnings": warnings,
@@ -577,14 +413,10 @@ def main():
             },
         }
 
-        debug("final report stats:", report["stats"])
-        debug("final report summary:", report["summary"])
-
         print(json.dumps(report))
 
     except ValueError as e:
-        debug("value error:", str(e))
-        error_report = {
+        print(json.dumps({
             "scan_window": {
                 "offset": 0,
                 "count": 0,
@@ -598,26 +430,21 @@ def main():
                 "utxos_found": 0,
             },
             "findings": [],
-            "warnings": [
-                {
-                    "type": "INVALID_INPUT",
-                    "severity": "HIGH",
-                    "description": str(e),
-                    "correction": "Check the descriptor format and try again.",
-                }
-            ],
+            "warnings": [{
+                "type": "INVALID_INPUT",
+                "severity": "HIGH",
+                "description": str(e),
+                "correction": "Check the descriptor format and try again.",
+            }],
             "summary": {
                 "findings": 0,
                 "warnings": 1,
                 "clean": False,
             },
-        }
-
-        print(json.dumps(error_report))
-
+        }))
     except Exception as e:
         debug("internal error:", repr(e))
-        error_report = {
+        print(json.dumps({
             "scan_window": {
                 "offset": 0,
                 "count": 0,
@@ -631,23 +458,18 @@ def main():
                 "utxos_found": 0,
             },
             "findings": [],
-            "warnings": [
-                {
-                    "type": "INTERNAL_ERROR",
-                    "severity": "HIGH",
-                    "description": str(e),
-                    "correction": "Try again later or inspect the server logs.",
-                }
-            ],
+            "warnings": [{
+                "type": "INTERNAL_ERROR",
+                "severity": "HIGH",
+                "description": str(e),
+                "correction": "Try again later or inspect the server logs.",
+            }],
             "summary": {
                 "findings": 0,
                 "warnings": 1,
                 "clean": False,
             },
-        }
-
-        print(json.dumps(error_report))
-
+        }))
 
 if __name__ == "__main__":
     main()
