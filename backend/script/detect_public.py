@@ -12,6 +12,20 @@ from bip_utils import Bip32Secp256k1, P2WPKHAddrEncoder, CoinsConf
 API_BASE = "https://blockstream.info/api"
 
 
+SLIP132_TO_BIP32 = {
+    "xpub": ("0488b21e", "0488b21e"),
+    "ypub": ("049d7cb2", "0488b21e"),
+    "zpub": ("04b24746", "0488b21e"),
+    "Ypub": ("0295b43f", "0488b21e"),
+    "Zpub": ("02aa7ed3", "0488b21e"),
+    "tpub": ("043587cf", "043587cf"),
+    "upub": ("044a5262", "043587cf"),
+    "vpub": ("045f1cf6", "043587cf"),
+    "Upub": ("024289ef", "043587cf"),
+    "Vpub": ("02575483", "043587cf"),
+}
+
+
 def fail(msg, code=1):
     print(msg, file=sys.stderr)
     sys.exit(code)
@@ -56,7 +70,8 @@ def parse_descriptor(descriptor):
     m = pattern.fullmatch(desc)
     if not m:
         raise ValueError(
-            "unsupported descriptor format: expected wpkh([fingerprint/path]xpub.../0/*), wpkh([fingerprint/path]xpub.../1/*), wpkh(xpub.../0/*), or wpkh(xpub.../1/*)"
+            "unsupported descriptor format: expected wpkh([fingerprint/path]xpub.../0/*), "
+            "wpkh([fingerprint/path]xpub.../1/*), wpkh(xpub.../0/*), or wpkh(xpub.../1/*)"
         )
 
     fingerprint = m.group("fingerprint")
@@ -89,7 +104,6 @@ def parse_descriptor(descriptor):
         "branch": branch,
         "descriptor": desc,
     }
-
 
 
 def convert_slip132_to_bip32(extpub):
@@ -222,8 +236,6 @@ def collect_wallet_data(addresses):
                     "confirmations": 1 if tx.get("status", {}).get("confirmed") else 0,
                     "blockheight": tx.get("status", {}).get("block_height", 0),
                 })
-
-    addr_utxos = []
 
     return tx_map, addr_txs, utxos
 
@@ -501,3 +513,12 @@ def main():
             "summary": {
                 "findings": 0,
                 "warnings": 1,
+                "clean": False,
+            },
+        }
+
+        print(json.dumps(error_report))
+
+
+if __name__ == "__main__":
+    main()
