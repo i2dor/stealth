@@ -20,19 +20,22 @@ function dedupeByKey(items = [], getKey) {
 }
 
 function mergeAggregateReports(prevAggregate, newReport) {
+  if (!newReport) return prevAggregate
+
   if (!prevAggregate) {
+    const findings = newReport?.findings || []
+    const warnings = newReport?.warnings || []
+
     return {
       stats: {
         transactions_analyzed: newReport?.stats?.transactions_analyzed || 0,
       },
-      findings: newReport?.findings || [],
-      warnings: newReport?.warnings || [],
+      findings,
+      warnings,
       summary: {
-        findings: newReport?.findings?.length || 0,
-        warnings: newReport?.warnings?.length || 0,
-        clean:
-          (newReport?.findings?.length || 0) === 0 &&
-          (newReport?.warnings?.length || 0) === 0,
+        findings: findings.length,
+        warnings: warnings.length,
+        clean: findings.length === 0 && warnings.length === 0,
       },
       aggregate_scan_window: {
         from_index: newReport?.scan_window?.from_index ?? 0,
@@ -55,23 +58,11 @@ function mergeAggregateReports(prevAggregate, newReport) {
       `${item.type || 'warning'}::${item.address || ''}::${item.txid || ''}::${item.message || ''}`
   )
 
-  const transactionsAnalyzed =
-    (prevAggregate?.stats?.transactions_analyzed || 0) +
-    (newReport?.stats?.transactions_analyzed || 0)
-
-  const fromIndex = Math.min(
-    prevAggregate?.aggregate_scan_window?.from_index ?? Infinity,
-    newReport?.scan_window?.from_index ?? Infinity
-  )
-
-  const toIndex = Math.max(
-    prevAggregate?.aggregate_scan_window?.to_index ?? 0,
-    newReport?.scan_window?.to_index ?? 0
-  )
-
   return {
     stats: {
-      transactions_analyzed: transactionsAnalyzed,
+      transactions_analyzed:
+        (prevAggregate?.stats?.transactions_analyzed || 0) +
+        (newReport?.stats?.transactions_analyzed || 0),
     },
     findings,
     warnings,
@@ -81,8 +72,15 @@ function mergeAggregateReports(prevAggregate, newReport) {
       clean: findings.length === 0 && warnings.length === 0,
     },
     aggregate_scan_window: {
-      from_index: Number.isFinite(fromIndex) ? fromIndex : 0,
-      to_index: toIndex,
+      from_index:
+        Math.min(
+          prevAggregate?.aggregate_scan_window?.from_index ?? Infinity,
+          newReport?.scan_window?.from_index ?? Infinity
+        ) || 0,
+      to_index: Math.max(
+        prevAggregate?.aggregate_scan_window?.to_index ?? 0,
+        newReport?.scan_window?.to_index ?? 0
+      ),
     },
   }
 }
@@ -123,22 +121,17 @@ export default function App() {
     try {
       const result = await analyzeWallet(desc, nextOffset, SCAN_BATCH_SIZE)
 
+      const nextAggregate = options.extendAggregate
+        ? mergeAggregateReports(aggregateReport, result)
+        : aggregateReport
+
       setReportCache((prev) => ({
         ...prev,
         [cacheKey]: result,
       }))
-
       setCurrentReport(result)
+      setAggregateReport(nextAggregate)
       setOffset(nextOffset)
-
-      setAggregateReport((prevAggregate) => {
-        if (!options.extendAggregate) return prevAggregate
-        return mergeAggregateReports(prevAggregate, result)
-      })
-
-      const nextAggregate = options.extendAggregate
-        ? mergeAggregateReports(aggregateReport, result)
-        : aggregateReport
 
       const hasIssues =
         (nextAggregate?.findings?.length || 0) > 0 ||
@@ -160,6 +153,7 @@ export default function App() {
     setReportCache({})
     setAggregateReport(null)
     setCurrentReport(null)
+    setOffset(0)
     await loadBatch(desc, 0, { extendAggregate: true })
   }
 
@@ -169,6 +163,15 @@ export default function App() {
 
   async function handleScanPrevious() {
     const previousOffset = Math.max(0, offset - SCAN_BATCH_SIZE)
+    const cacheKey = `${descriptor}::${previousOffset}`
+
+    if (reportCache[cacheKey]) {
+      setCurrentReport(reportCache[cacheKey])
+      setOffset(previousOffset)
+      setScreen('report')
+      return
+    }
+
     await loadBatch(descriptor, previousOffset, { extendAggregate: false })
   }
 
@@ -201,10 +204,5 @@ export default function App() {
     )
   }
 
-  return (
-    <InputScreen
-      onAnalyze={handleAnalyze}
-      error={error}
-    />
-  )
+  return <InputScreen onAnalyze={handleAnalyze} error={error} />
 }
