@@ -22,47 +22,36 @@ function dedupeByKey(items = [], getKey) {
 function mergeAggregateReports(prevAggregate, newReport) {
   if (!newReport) return prevAggregate
 
-  if (!prevAggregate) {
-    const findings = newReport?.findings || []
-    const warnings = newReport?.warnings || []
-
-    return {
-      stats: {
-        transactions_analyzed: newReport?.stats?.transactions_analyzed || 0,
-      },
-      findings,
-      warnings,
-      summary: {
-        findings: findings.length,
-        warnings: warnings.length,
-        clean: findings.length === 0 && warnings.length === 0,
-      },
-      aggregate_scan_window: {
-        from_index: newReport?.scan_window?.from_index ?? 0,
-        to_index: newReport?.scan_window?.to_index ?? 0,
-      },
-    }
-  }
+  const prevFindings = prevAggregate?.findings || []
+  const prevWarnings = prevAggregate?.warnings || []
+  const newFindings = newReport?.findings || []
+  const newWarnings = newReport?.warnings || []
 
   const findings = dedupeByKey(
-    [...(prevAggregate.findings || []), ...(newReport?.findings || [])],
+    [...prevFindings, ...newFindings],
     (item) =>
       item.id ||
       `${item.type || 'finding'}::${item.address || ''}::${item.txid || ''}::${item.message || ''}`
   )
 
   const warnings = dedupeByKey(
-    [...(prevAggregate.warnings || []), ...(newReport?.warnings || [])],
+    [...prevWarnings, ...newWarnings],
     (item) =>
       item.id ||
       `${item.type || 'warning'}::${item.address || ''}::${item.txid || ''}::${item.message || ''}`
   )
 
+  const prevTxs = prevAggregate?.stats?.transactions_analyzed || 0
+  const newTxs = newReport?.stats?.transactions_analyzed || 0
+
+  const prevFrom = prevAggregate?.aggregate_scan_window?.from_index
+  const prevTo = prevAggregate?.aggregate_scan_window?.to_index
+  const newFrom = newReport?.scan_window?.from_index
+  const newTo = newReport?.scan_window?.to_index
+
   return {
     stats: {
-      transactions_analyzed:
-        (prevAggregate?.stats?.transactions_analyzed || 0) +
-        (newReport?.stats?.transactions_analyzed || 0),
+      transactions_analyzed: prevTxs + newTxs,
     },
     findings,
     warnings,
@@ -73,14 +62,13 @@ function mergeAggregateReports(prevAggregate, newReport) {
     },
     aggregate_scan_window: {
       from_index:
-        Math.min(
-          prevAggregate?.aggregate_scan_window?.from_index ?? Infinity,
-          newReport?.scan_window?.from_index ?? Infinity
-        ) || 0,
-      to_index: Math.max(
-        prevAggregate?.aggregate_scan_window?.to_index ?? 0,
-        newReport?.scan_window?.to_index ?? 0
-      ),
+        prevFrom === undefined
+          ? (newFrom ?? 0)
+          : Math.min(prevFrom, newFrom ?? prevFrom),
+      to_index:
+        prevTo === undefined
+          ? (newTo ?? 0)
+          : Math.max(prevTo, newTo ?? prevTo),
     },
   }
 }
@@ -121,21 +109,30 @@ export default function App() {
     try {
       const result = await analyzeWallet(desc, nextOffset, SCAN_BATCH_SIZE)
 
-      const nextAggregate = options.extendAggregate
-        ? mergeAggregateReports(aggregateReport, result)
-        : aggregateReport
+      console.log('Scanning offset:', nextOffset)
+      console.log('API result:', result)
+      console.log('findings:', result?.findings)
+      console.log('warnings:', result?.warnings)
+      console.log('stats:', result?.stats)
+      console.log('scan_window:', result?.scan_window)
+
+      let computedAggregate = aggregateReport
+
+      if (options.extendAggregate) {
+        computedAggregate = mergeAggregateReports(aggregateReport, result)
+      }
 
       setReportCache((prev) => ({
         ...prev,
         [cacheKey]: result,
       }))
       setCurrentReport(result)
-      setAggregateReport(nextAggregate)
+      setAggregateReport(computedAggregate)
       setOffset(nextOffset)
 
       const hasIssues =
-        (nextAggregate?.findings?.length || 0) > 0 ||
-        (nextAggregate?.warnings?.length || 0) > 0
+        (computedAggregate?.findings?.length || 0) > 0 ||
+        (computedAggregate?.warnings?.length || 0) > 0
 
       setSuccess(hasIssues ? '' : 'Wallet analysis completed successfully.')
       setScreen('report')
