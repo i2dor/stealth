@@ -4,7 +4,7 @@ import LoadingScreen from './screens/LoadingScreen'
 import ReportScreen from './screens/ReportScreen'
 import { analyzeWallet } from './services/walletService'
 
-const SCAN_BATCH_SIZE = 100
+const SCAN_BATCH_SIZE = 20
 
 function dedupeByKey(items = [], getKey) {
   const map = new Map()
