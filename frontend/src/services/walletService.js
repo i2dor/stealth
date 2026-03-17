@@ -3,9 +3,6 @@ const API_BASE =
 
 export const analyzeWallet = async (descriptor) => {
   const url = `${API_BASE}/api/wallet/scan?descriptor=${encodeURIComponent(descriptor)}`
-  console.log('API_BASE =', API_BASE)
-  console.log('request url =', url)
-
   const res = await fetch(url)
   const text = await res.text()
 
