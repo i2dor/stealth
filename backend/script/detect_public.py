@@ -237,6 +237,22 @@ def collect_wallet_data(addresses):
                     "blockheight": tx.get("status", {}).get("block_height", 0),
                 })
 
+        try:
+            addr_unspent = address_utxos(addr)
+        except Exception:
+            addr_unspent = []
+
+        for u in addr_unspent:
+            status = u.get("status", {}) or {}
+            utxos.append({
+                "address": addr,
+                "txid": u.get("txid", ""),
+                "vout": u.get("vout", 0),
+                "amount": u.get("value", 0) / 100_000_000,
+                "confirmations": 1 if status.get("confirmed") else 0,
+                "blockheight": status.get("block_height", 0),
+            })
+
     return tx_map, addr_txs, utxos
 
 
