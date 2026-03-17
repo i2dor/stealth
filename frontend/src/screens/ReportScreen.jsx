@@ -6,13 +6,12 @@ function truncateDescriptor(desc) {
   return `${desc.slice(0, 80)}…`
 }
 
-export default function ReportScreen({ report, descriptor, onReset }) {
+export default function ReportScreen({ report, descriptor, success, onReset }) {
   const { stats, findings, warnings, summary } = report
 
   return (
     <div className={styles.root}>
       <div className={styles.container}>
-        {/* Nav */}
         <div className={styles.header}>
           <div className={styles.nav}>
             <div className={styles.wordmark}>
@@ -31,7 +30,8 @@ export default function ReportScreen({ report, descriptor, onReset }) {
           </div>
         </div>
 
-        {/* Summary bar */}
+        {success && <div className={styles.successBanner}>{success}</div>}
+
         <div className={styles.summaryBar}>
           <div className={`${styles.summaryCard} ${styles.vulnerable}`}>
             <div className={styles.summaryNumber}>{summary.findings}</div>
@@ -47,14 +47,12 @@ export default function ReportScreen({ report, descriptor, onReset }) {
           </div>
         </div>
 
-        {/* Clean banner */}
         {summary.clean && (
           <div className={styles.cleanBanner}>
             No privacy issues found — this wallet has a clean history.
           </div>
         )}
 
-        {/* Findings */}
         {findings.length > 0 && (
           <>
             <div className={styles.listHeader}>
@@ -68,7 +66,6 @@ export default function ReportScreen({ report, descriptor, onReset }) {
           </>
         )}
 
-        {/* Warnings */}
         {warnings.length > 0 && (
           <>
             <div className={styles.listHeader} style={{ marginTop: 28 }}>
