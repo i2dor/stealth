@@ -26,6 +26,10 @@ SLIP132_TO_BIP32 = {
 }
 
 
+def debug(*args):
+    print(*args, file=sys.stderr)
+
+
 def fail(msg, code=1):
     print(msg, file=sys.stderr)
     sys.exit(code)
@@ -152,9 +156,14 @@ def derive_wpkh_addresses(extpub, count, branch, start_index=0):
 
 def api_get(path):
     url = f"{API_BASE}{path}"
+    debug("GET", url)
     r = requests.get(url, timeout=(5, 10))
     r.raise_for_status()
     return r.json()
+
+
+def address_stats(address):
+    return api_get(f"/address/{address}")
 
 
 def address_txs(address):
@@ -192,12 +201,47 @@ def collect_wallet_data(addresses):
     tx_map = {}
     addr_txs = defaultdict(list)
     utxos = []
+    address_activity = {}
 
     for addr in addresses:
+        stats = {}
         try:
-            txs = address_txs(addr)
-        except Exception:
-            txs = []
+            stats = address_stats(addr)
+        except Exception as e:
+            debug(f"stats error for {addr}: {e}")
+
+        chain_stats = stats.get("chain_stats", {}) or {}
+        mempool_stats = stats.get("mempool_stats", {}) or {}
+
+        funded_count = chain_stats.get("funded_txo_count", 0) + mempool_stats.get("funded_txo_count", 0)
+        spent_count = chain_stats.get("spent_txo_count", 0) + mempool_stats.get("spent_txo_count", 0)
+        tx_count = chain_stats.get("tx_count", 0) + mempool_stats.get("tx_count", 0)
+        funded_sum = chain_stats.get("funded_txo_sum", 0) + mempool_stats.get("funded_txo_sum", 0)
+        spent_sum = chain_stats.get("spent_txo_sum", 0) + mempool_stats.get("spent_txo_sum", 0)
+
+        address_activity[addr] = {
+            "funded_count": funded_count,
+            "spent_count": spent_count,
+            "tx_count": tx_count,
+            "funded_sum": funded_sum,
+            "spent_sum": spent_sum,
+        }
+
+        debug(
+            f"address={addr} "
+            f"tx_count={tx_count} funded_count={funded_count} spent_count={spent_count} "
+            f"funded_sum={funded_sum} spent_sum={spent_sum}"
+        )
+
+        txs = []
+        if tx_count > 0 or funded_count > 0 or spent_count > 0:
+            try:
+                txs = address_txs(addr)
+            except Exception as e:
+                debug(f"tx error for {addr}: {e}")
+                txs = []
+        else:
+            debug(f"skip tx history for unused address {addr}")
 
         for tx in txs:
             txid = tx["txid"]
@@ -239,8 +283,11 @@ def collect_wallet_data(addresses):
 
         try:
             addr_unspent = address_utxos(addr)
-        except Exception:
+        except Exception as e:
+            debug(f"utxo error for {addr}: {e}")
             addr_unspent = []
+
+        debug(f"address={addr} utxos={len(addr_unspent)}")
 
         for u in addr_unspent:
             status = u.get("status", {}) or {}
@@ -253,7 +300,7 @@ def collect_wallet_data(addresses):
                 "blockheight": status.get("block_height", 0),
             })
 
-    return tx_map, addr_txs, utxos
+    return tx_map, addr_txs, utxos, address_activity
 
 
 class TxGraph:
@@ -445,6 +492,9 @@ def build_addr_map(addresses, branch, start_index=0):
 
 def main():
     try:
+        debug("=== detect_public.py start ===")
+        debug("argv:", sys.argv)
+
         if len(sys.argv) < 2:
             raise ValueError("descriptor argument required")
 
@@ -469,6 +519,7 @@ def main():
             raise ValueError("count must be <= 500")
 
         parsed = parse_descriptor(descriptor)
+        debug("parsed descriptor:", parsed)
 
         addresses = derive_wpkh_addresses(
             parsed["extpub"],
@@ -476,13 +527,21 @@ def main():
             parsed["branch"],
             start_index=offset,
         )
+        debug(f"derived {len(addresses)} addresses")
+        debug("first 5 addresses:", addresses[:5])
+
         addr_map = build_addr_map(
             addresses,
             parsed["branch"],
             start_index=offset,
         )
 
-        tx_map, addr_txs, utxos = collect_wallet_data(addresses)
+        tx_map, addr_txs, utxos, address_activity = collect_wallet_data(addresses)
+
+        debug(f"tx_map size: {len(tx_map)}")
+        debug(f"utxos size: {len(utxos)}")
+        debug(f"active addresses: {len([a for a, meta in address_activity.items() if meta.get('tx_count', 0) > 0 or meta.get('funded_count', 0) > 0 or meta.get('spent_count', 0) > 0])}")
+
         graph = TxGraph(addr_map, tx_map, addr_txs, utxos)
 
         findings = []
@@ -518,9 +577,13 @@ def main():
             },
         }
 
+        debug("final report stats:", report["stats"])
+        debug("final report summary:", report["summary"])
+
         print(json.dumps(report))
 
     except ValueError as e:
+        debug("value error:", str(e))
         error_report = {
             "scan_window": {
                 "offset": 0,
@@ -553,6 +616,7 @@ def main():
         print(json.dumps(error_report))
 
     except Exception as e:
+        debug("internal error:", repr(e))
         error_report = {
             "scan_window": {
                 "offset": 0,
