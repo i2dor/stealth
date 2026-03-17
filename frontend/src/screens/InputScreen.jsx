@@ -3,7 +3,7 @@ import styles from './InputScreen.module.css'
 
 const PLACEHOLDER = `wpkh([a1b2c3d4/84h/0h/0h]xpub6CatWdiZynkCminahu8Gmr7FAVnQXBTSMaBxn6qmBNkdm9tDkFzWmjmDrLBCQSTa7BHgpEjCXzMTCyDsQLSmcGYJHBB7cTwpqLNRKGP47uw/0/*)#qwer1234`
 
-export default function InputScreen({ onAnalyze }) {
+export default function InputScreen({ onAnalyze, error }) {
   const [descriptor, setDescriptor] = useState('')
 
   function handleSubmit(e) {
@@ -27,6 +27,7 @@ export default function InputScreen({ onAnalyze }) {
           <label className={styles.label} htmlFor="descriptor">
             Wallet Descriptor
           </label>
+
           <textarea
             id="descriptor"
             className={styles.textarea}
@@ -37,6 +38,24 @@ export default function InputScreen({ onAnalyze }) {
             autoCorrect="off"
             autoCapitalize="off"
           />
+
+          {error && (
+            <div
+              style={{
+                marginTop: 12,
+                padding: '12px 14px',
+                borderRadius: 12,
+                border: '1px solid rgba(255, 90, 90, 0.35)',
+                background: 'rgba(255, 90, 90, 0.08)',
+                color: '#ff8f8f',
+                fontSize: 14,
+                lineHeight: 1.5,
+              }}
+            >
+              {error}
+            </div>
+          )}
+
           <button
             type="submit"
             className={styles.button}
@@ -44,6 +63,7 @@ export default function InputScreen({ onAnalyze }) {
           >
             Analyze Wallet
           </button>
+
           <p className={styles.hint}>
             Supports <code>wpkh()</code>, <code>pkh()</code>, <code>sh(wpkh())</code> descriptors
           </p>
