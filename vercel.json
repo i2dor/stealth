@@ -4,7 +4,7 @@
   "outputDirectory": "frontend/dist",
   "functions": {
     "api/scan.py": {
-      "runtime": "vercel-python@4.3.1"
+      "runtime": "@vercel/python"
     }
   },
   "routes": [
