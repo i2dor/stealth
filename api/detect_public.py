@@ -51,6 +51,26 @@ session.headers.update({"User-Agent": "Stealth-Wallet-Analyzer/1.0"})
 _request_count = 0
 _scan_start_offset = 0
 
+
+def configure_proxy(proxy_url: str | None):
+    """
+    Configure the shared requests session to route through a SOCKS5 proxy.
+    Pass None or empty string to clear any existing proxy.
+
+    Example: configure_proxy("socks5://127.0.0.1:9050")
+    Requires: pip install requests[socks]  (installs PySocks)
+    """
+    if proxy_url:
+        session.proxies = {
+            "http": proxy_url,
+            "https": proxy_url,
+        }
+        debug(f"[proxy] Routing requests through {proxy_url}")
+    else:
+        session.proxies = {}
+        debug("[proxy] No proxy configured — direct connections")
+
+
 def debug(*args):
     print(*args, file=sys.stderr)
 
@@ -398,16 +418,6 @@ def detect_cioh(g):
 
 
 def detect_payjoin_interaction(g):
-    """
-    PayJoin (P2EP) detection heuristic:
-    A transaction where:
-    - at least one of OUR addresses is in the inputs AND
-    - at least one external address is also in the inputs AND
-    - at least one of our addresses receives an output
-    This pattern is consistent with PayJoin — the recipient adds their own input.
-    We flag it as INFORMATIONAL: the user may have used PayJoin (good), or may
-    have unknowingly participated in a transaction with external inputs (risky).
-    """
     findings = []
     for txid in g.our_txids:
         tx = g.fetch_tx(txid)
@@ -423,7 +433,6 @@ def detect_payjoin_interaction(g):
         if not our_input_addrs or not ext_input_addrs:
             continue
 
-        # check if we also receive an output in the same tx
         our_output_addrs = [
             vout.get("scriptpubkey_address", "")
             for vout in tx.get("vout", [])
@@ -435,7 +444,7 @@ def detect_payjoin_interaction(g):
                 "type": "PAYJOIN_INTERACTION",
                 "severity": "LOW",
                 "description": (
-                    f"TX {txid[:16]}… has mixed inputs (yours + external) and outputs to your wallet. "
+                    f"TX {txid[:16]}\u2026 has mixed inputs (yours + external) and outputs to your wallet. "
                     "Consistent with a PayJoin/P2EP transaction."
                 ),
                 "details": {
@@ -445,7 +454,7 @@ def detect_payjoin_interaction(g):
                     "our_outputs": len(our_output_addrs),
                 },
                 "correction": (
-                    "If you intentionally used PayJoin — great, this improves privacy. "
+                    "If you intentionally used PayJoin \u2014 great, this improves privacy. "
                     "If not, an external party contributed inputs alongside yours, which could be a privacy risk."
                 ),
             })
@@ -453,12 +462,6 @@ def detect_payjoin_interaction(g):
 
 
 def detect_whirlpool_patterns(g):
-    """
-    Whirlpool CoinJoin detection:
-    - Transaction has exactly 5 outputs of equal value matching a known Whirlpool pool amount
-    - All outputs are P2WPKH (bc1q…)
-    - At least one output goes to one of our addresses
-    """
     findings = []
     for txid in g.our_txids:
         tx = g.fetch_tx(txid)
@@ -469,14 +472,11 @@ def detect_whirlpool_patterns(g):
         if len(vouts) < 4:
             continue
 
-        # Collect output values
         output_values = [vout.get("value", 0) for vout in vouts]
 
-        # Check for equal-value outputs matching Whirlpool pools
         for pool_sats in WHIRLPOOL_POOL_AMOUNTS:
             matching = [v for v in output_values if v == pool_sats]
-            if len(matching) >= 4:  # Whirlpool typically has 5 equal outputs
-                # Check if any go to us
+            if len(matching) >= 4:
                 our_outputs = [
                     vout for vout in vouts
                     if vout.get("value") == pool_sats and g.is_ours(vout.get("scriptpubkey_address", ""))
@@ -486,7 +486,7 @@ def detect_whirlpool_patterns(g):
                         "type": "WHIRLPOOL_COINJOIN",
                         "severity": "LOW",
                         "description": (
-                            f"TX {txid[:16]}… matches Whirlpool CoinJoin pattern "
+                            f"TX {txid[:16]}\u2026 matches Whirlpool CoinJoin pattern "
                             f"({len(matching)} equal outputs of {pool_sats:,} sats)."
                         ),
                         "details": {
@@ -496,25 +496,15 @@ def detect_whirlpool_patterns(g):
                             "our_mixed_outputs": len(our_outputs),
                         },
                         "correction": (
-                            "This looks like a Whirlpool mix — good for privacy! "
+                            "This looks like a Whirlpool mix \u2014 good for privacy! "
                             "Make sure post-mix UTXOs are spent carefully to preserve the anonymity set."
                         ),
                     })
-                    break  # one finding per tx is enough
+                    break
     return findings
 
 
 def detect_fee_fingerprinting(g):
-    """
-    Fee fingerprinting detection:
-    Some wallets use distinctive fee-rate patterns (e.g. always round sat/vB like 1, 2, 5, 10)
-    or specific fee calculation methods (e.g. fee is exactly divisible by output count).
-    We detect:
-    1. Round fee-rate pattern: fee rate is a round number (1, 2, 5, 10, 20, 50 sat/vB)
-    2. Batched payment fingerprint: single tx sends to 5+ external outputs
-       (suggests a custodial or corporate batcher)
-    3. Unnecessary change fingerprint: change output is disproportionately small vs. payment
-    """
     findings = []
     round_fee_rates = {1, 2, 5, 10, 15, 20, 25, 50, 100}
     round_fee_txids = []
@@ -530,7 +520,6 @@ def detect_fee_fingerprinting(g):
         weight = tx.get("weight", 0)
         vsize = max(1, (weight + 3) // 4) if weight else 0
 
-        # 1. Round fee rate detection
         if vsize > 0 and fee > 0:
             fee_rate = round(fee / vsize)
             if fee_rate in round_fee_rates:
@@ -540,7 +529,6 @@ def detect_fee_fingerprinting(g):
                     "fee_sats": fee,
                 })
 
-        # 2. Batch payment detection (many external outputs)
         vouts = tx.get("vout", [])
         external_outputs = [
             vout for vout in vouts
@@ -553,7 +541,6 @@ def detect_fee_fingerprinting(g):
                 "external_output_count": len(external_outputs),
             })
 
-        # 3. Tiny change output detection
         our_outputs = [
             vout for vout in vouts
             if g.is_ours(vout.get("scriptpubkey_address", ""))
@@ -566,7 +553,6 @@ def detect_fee_fingerprinting(g):
         if our_outputs and non_our_outputs:
             our_max = max(v.get("value", 0) for v in our_outputs)
             ext_max = max(v.get("value", 0) for v in non_our_outputs)
-            # If our "change" is less than 1% of the payment, it's a fingerprint
             if ext_max > 0 and our_max / ext_max < 0.01 and our_max < 10_000:
                 tiny_change_txids.append({
                     "txid": txid,
@@ -580,10 +566,10 @@ def detect_fee_fingerprinting(g):
             "severity": "LOW",
             "description": (
                 f"{len(round_fee_txids)} transaction(s) use a round fee rate "
-                "(e.g. 1, 5, 10 sat/vB) — a fingerprint of some wallet software."
+                "(e.g. 1, 5, 10 sat/vB) \u2014 a fingerprint of some wallet software."
             ),
             "details": {
-                "transactions": round_fee_txids[:10],  # cap at 10
+                "transactions": round_fee_txids[:10],
                 "count": len(round_fee_txids),
             },
             "correction": (
@@ -597,7 +583,7 @@ def detect_fee_fingerprinting(g):
             "type": "BATCH_PAYMENT_FINGERPRINT",
             "severity": "LOW",
             "description": (
-                f"{len(batch_payment_txids)} transaction(s) send to 5+ external outputs — "
+                f"{len(batch_payment_txids)} transaction(s) send to 5+ external outputs \u2014 "
                 "typical of exchange or custodial batching."
             ),
             "details": {
@@ -686,7 +672,6 @@ def scan_branch(parsed, offset, count, branch):
 
 
 def _merge_branch_reports(reports):
-    """Merge multiple branch scan reports into one aggregate."""
     all_findings = []
     all_warnings = []
     total_txs = 0
@@ -810,6 +795,7 @@ def run_auto_scan(descriptor: str, branch_mode: str = "receive") -> dict:
         "total_addresses_scanned": total_addresses_scanned,
         "api_base": API_BASE,
         "request_delay_ms": int(REQUEST_DELAY * 1000),
+        "proxy": session.proxies.get("https", None),
     }
     final["scan_window"] = {
         "from_index": final["aggregate_scan_window"]["from_index"],
@@ -885,6 +871,7 @@ def run_scan(descriptor: str, offset: int = 0, count: int = 60, branch_mode: str
             "branches_checked": branches,
             "api_base": API_BASE,
             "request_delay_ms": int(REQUEST_DELAY * 1000),
+            "proxy": session.proxies.get("https", None),
         }
         return final
 
@@ -902,5 +889,6 @@ def run_scan(descriptor: str, offset: int = 0, count: int = 60, branch_mode: str
         "branches_checked": branches,
         "api_base": API_BASE,
         "request_delay_ms": int(REQUEST_DELAY * 1000),
+        "proxy": session.proxies.get("https", None),
     }
     return merged
