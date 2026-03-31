@@ -71,6 +71,7 @@ export default function ReportScreen({
   report,
   aggregateReport,
   descriptor,
+  offset,
   success,
   onReset,
   onScanNext,
@@ -89,7 +90,9 @@ export default function ReportScreen({
   const toIndex = currentWindow?.to_index ?? 0
   const totalFrom = aggregateWindow?.from_index ?? fromIndex
   const totalTo = aggregateWindow?.to_index ?? toIndex
-  const isFirstBatch = fromIndex <= 0
+
+  // Use offset prop (from App state) for reliable first-batch detection
+  const isFirstBatch = (offset ?? 0) === 0
 
   return (
     <div className={styles.root}>
@@ -140,7 +143,9 @@ export default function ReportScreen({
         )}
 
         <div className={styles.scanMeta}>
-          Batch: addresses {fromIndex}–{toIndex} &nbsp;·&nbsp; Total scanned: {totalFrom}–{totalTo}
+          Current batch: addresses&nbsp;<strong>{fromIndex}–{toIndex}</strong>
+          &nbsp;·&nbsp;
+          Total scanned: addresses&nbsp;<strong>{totalFrom}–{totalTo}</strong>
         </div>
 
         <div className={styles.paginationRow}>
@@ -148,6 +153,7 @@ export default function ReportScreen({
             className={styles.moreButton}
             onClick={onScanPrevious}
             disabled={isFirstBatch}
+            title={isFirstBatch ? 'Already at first batch' : 'Go to previous batch'}
           >
             ← Previous batch
           </button>
@@ -155,6 +161,7 @@ export default function ReportScreen({
           <button
             className={styles.moreButton}
             onClick={onScanNext}
+            title="Scan next 60 addresses"
           >
             Next batch →
           </button>

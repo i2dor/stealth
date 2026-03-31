@@ -163,6 +163,7 @@ export default function App() {
         aggregateReport={aggregateReport}
         descriptor={descriptor}
         scanOptions={scanOptions}
+        offset={offset}
         success={success}
         onReset={handleReset}
         onScanNext={handleScanNext}
