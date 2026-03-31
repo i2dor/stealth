@@ -353,6 +353,36 @@ class TxGraph:
             })
         return addrs
 
+    def get_output_addresses(self, txid):
+        tx = self.fetch_tx(txid)
+        if not tx:
+            return []
+        addrs = []
+        for vout in tx.get("vout", []):
+            addrs.append({
+                "address": vout.get("scriptpubkey_address", ""),
+                "value": vout.get("value", 0) / 100_000_000,
+                "n": vout.get("n", 0),
+                "type": vout.get("scriptpubkey_type", "unknown"),
+            })
+        return addrs
+
+    def get_script_type(self, address):
+        """Return script type for an address — from addr_map or address-prefix heuristic."""
+        meta = self.addr_map.get(address)
+        if meta:
+            return meta.get("type", "unknown")
+        # Heuristic from address prefix (mainnet + testnet)
+        if address.startswith(("bc1q", "tb1q", "bcrt1q")):
+            return "p2wpkh"
+        if address.startswith(("bc1p", "tb1p", "bcrt1p")):
+            return "p2tr"
+        if address.startswith(("3", "2")):
+            return "p2sh-p2wpkh"
+        if address.startswith(("1", "m", "n")):
+            return "p2pkh"
+        return "unknown"
+
 
 # ─────────────────────────────────────────────────────────
 # DETECTORS
@@ -365,7 +395,6 @@ def detect_address_reuse(g):
     """
     findings = []
     for addr in g.our_addrs:
-        # Collect all unique receive txids from addr_txs AND addr_received_outputs
         receive_txids = set()
         for entry in g.addr_txs.get(addr, []):
             if entry["category"] == "receive":
@@ -398,10 +427,8 @@ def detect_dust(g):
     2. Historical dust outputs received (already spent — still reveals a dust attack attempt)
     """
     findings = []
-    # Set of (address, txid, n) already reported to avoid duplicates
     reported = set()
 
-    # 1. Current unspent dust UTXOs
     current_unspent_txids = {(u["address"], u["txid"], u["vout"]) for u in g.utxos}
     for u in g.utxos:
         sats = satoshis(u["amount"])
@@ -426,7 +453,6 @@ def detect_dust(g):
                 "correction": "Do not spend this dust. Use coin control to exclude it, or consolidate with a dedicated coinjoin tool.",
             })
 
-    # 2. Historical dust outputs (already spent) — dust attack evidence
     for addr, outputs in g.addr_received_outputs.items():
         if not g.is_ours(addr):
             continue
@@ -455,6 +481,49 @@ def detect_dust(g):
     return findings
 
 
+def detect_dust_spending(g):
+    """Detect transactions that spend dust alongside normal inputs."""
+    findings = []
+    DUST_SATS = 1000
+
+    for txid in g.our_txids:
+        input_addrs = g.get_input_addresses(txid)
+        if not input_addrs or len(input_addrs) < 2:
+            continue
+
+        dust_inputs = []
+        normal_inputs = []
+        for ia in input_addrs:
+            if not g.is_ours(ia["address"]):
+                continue
+            sats = satoshis(ia["value"])
+            if sats <= DUST_SATS:
+                dust_inputs.append(ia)
+            elif sats > 10_000:
+                normal_inputs.append(ia)
+
+        if dust_inputs and normal_inputs:
+            findings.append({
+                "type": "DUST_SPENDING",
+                "severity": "HIGH",
+                "description": (
+                    f"TX {txid[:16]}\u2026 spends {len(dust_inputs)} dust input(s) alongside "
+                    f"{len(normal_inputs)} normal input(s) — permanently links these addresses."
+                ),
+                "details": {
+                    "txid": txid,
+                    "dust_inputs": [{"address": d["address"], "sats": satoshis(d["value"])} for d in dust_inputs],
+                    "normal_inputs": [{"address": n["address"], "amount_btc": round(n["value"], 8)} for n in normal_inputs],
+                },
+                "correction": (
+                    "Freeze dust UTXOs in your wallet to prevent automatic selection. "
+                    "Never manually include a dust UTXO in a transaction that also spends normal UTXOs. "
+                    "If dust must be reclaimed, do so in isolation via a dedicated CoinJoin."
+                ),
+            })
+    return findings
+
+
 def detect_cioh(g):
     findings = []
     for txid in g.our_txids:
@@ -463,18 +532,595 @@ def detect_cioh(g):
             continue
         our_inputs = [i for i in inputs if g.is_ours(i["address"])]
         if len(our_inputs) >= 2:
+            n_ours = len(our_inputs)
+            total = len(inputs)
+            ownership_pct = round(n_ours / total * 100)
+            severity = "CRITICAL" if n_ours == total else "HIGH"
             findings.append({
                 "type": "CIOH",
-                "severity": "HIGH",
-                "description": f"TX {txid[:16]}\u2026 merges {len(our_inputs)} of your inputs — all are assumed to belong to the same owner.",
+                "severity": severity,
+                "description": f"TX {txid[:16]}\u2026 merges {n_ours}/{total} of your inputs ({ownership_pct}% ownership).",
                 "details": {
                     "txid": txid,
-                    "our_inputs": len(our_inputs),
-                    "total_inputs": len(inputs),
+                    "our_inputs": n_ours,
+                    "total_inputs": total,
+                    "ownership_pct": ownership_pct,
                     "our_input_addresses": [i["address"] for i in our_inputs][:5],
                 },
-                "correction": "Use coin control to avoid merging multiple UTXOs in a single transaction.",
+                "correction": "Use coin control to avoid merging multiple UTXOs in a single transaction. If consolidation is unavoidable, do it via CoinJoin.",
             })
+    return findings
+
+
+def detect_change_detection(g):
+    """
+    Detect transactions where the change output is easily distinguishable via
+    standard heuristics: round payment vs non-round change, script type mismatch,
+    internal derivation path.
+    """
+    findings = []
+
+    for txid in g.our_txids:
+        tx = g.fetch_tx(txid)
+        if not tx:
+            continue
+        outputs = g.get_output_addresses(txid)
+        input_addrs = g.get_input_addresses(txid)
+        if not outputs or len(outputs) < 2:
+            continue
+
+        our_in = [ia for ia in input_addrs if g.is_ours(ia["address"])]
+        if not our_in:
+            continue
+
+        our_outs = [o for o in outputs if g.is_ours(o["address"])]
+        ext_outs = [o for o in outputs if not g.is_ours(o["address"])
+                    and o.get("type") != "op_return"]
+
+        if not our_outs or not ext_outs:
+            continue
+
+        problems = []
+        for change in our_outs:
+            ch_sats = satoshis(change["value"])
+            ch_round = (ch_sats % 100_000 == 0 or ch_sats % 1_000_000 == 0)
+
+            for payment in ext_outs:
+                pay_sats = satoshis(payment["value"])
+                pay_round = (pay_sats % 100_000 == 0 or pay_sats % 1_000_000 == 0)
+
+                # Heuristic 1: round payment, non-round change
+                if pay_round and not ch_round:
+                    problems.append(
+                        f"Round payment ({pay_sats:,} sats) vs non-round change ({ch_sats:,} sats)"
+                    )
+
+                # Heuristic 2: change script type differs from payment type
+                in_types = {g.get_script_type(ia["address"]) for ia in our_in}
+                ch_type = g.get_script_type(change["address"])
+                pay_type = g.get_script_type(payment["address"])
+                if ch_type in in_types and ch_type != pay_type:
+                    problems.append(
+                        f"Change script type ({ch_type}) matches input but differs from payment ({pay_type})"
+                    )
+
+            # Heuristic 3: internal derivation path (/1/*)
+            ch_meta = g.addr_map.get(change["address"], {})
+            if ch_meta.get("internal"):
+                if "BIP-44 internal path" not in " ".join(problems):
+                    problems.append(
+                        "Change uses an internal (BIP-44 /1/*) derivation path — standard wallet change pattern"
+                    )
+
+        if problems:
+            findings.append({
+                "type": "CHANGE_DETECTION",
+                "severity": "MEDIUM",
+                "description": (
+                    f"TX {txid[:16]}\u2026 has identifiable change output(s) "
+                    f"({len(problems)} heuristic(s) matched)."
+                ),
+                "details": {
+                    "txid": txid,
+                    "reasons": problems[:6],
+                    "change_outputs": [
+                        {"address": co["address"], "amount_btc": round(co["value"], 8)}
+                        for co in our_outs
+                    ],
+                },
+                "correction": (
+                    "Use PayJoin (BIP-78) so the receiver also contributes an input, breaking the payment/change heuristic. "
+                    "Alternatively, select a UTXO that exactly covers the payment amount (no change output needed). "
+                    "Ensure your change address uses the same script type as the payment address."
+                ),
+            })
+
+    return findings
+
+
+def detect_consolidation(g):
+    """
+    Detect UTXOs born from a prior consolidation transaction
+    (>= 3 inputs, <= 2 outputs).
+    """
+    findings = []
+    CONSOLIDATION_THRESHOLD = 3
+    seen_txids = set()
+
+    for utxo in g.utxos:
+        if not g.is_ours(utxo.get("address", "")):
+            continue
+        parent_txid = utxo["txid"]
+        if parent_txid in seen_txids:
+            continue
+        parent = g.fetch_tx(parent_txid)
+        if not parent:
+            continue
+        n_in = len(parent.get("vin", []))
+        n_out = len(parent.get("vout", []))
+        if n_in >= CONSOLIDATION_THRESHOLD and n_out <= 2:
+            seen_txids.add(parent_txid)
+            parent_inputs = g.get_input_addresses(parent_txid)
+            our_parent_in = [ia for ia in parent_inputs if g.is_ours(ia["address"])]
+            findings.append({
+                "type": "CONSOLIDATION",
+                "severity": "MEDIUM",
+                "description": (
+                    f"UTXO {parent_txid[:16]}\u2026:{utxo['vout']} "
+                    f"({utxo['amount']:.8f} BTC) born from a {n_in}-input consolidation."
+                ),
+                "details": {
+                    "txid": parent_txid,
+                    "vout": utxo["vout"],
+                    "amount_btc": round(utxo["amount"], 8),
+                    "consolidation_inputs": n_in,
+                    "consolidation_outputs": n_out,
+                    "our_inputs_in_consolidation": len(our_parent_in),
+                },
+                "correction": (
+                    "Avoid consolidating many UTXOs in a single transaction — it permanently links all those "
+                    "addresses under CIOH. If fee savings require consolidation, do it through a CoinJoin "
+                    "(e.g., Whirlpool or JoinMarket) so the link is indistinguishable from other participants."
+                ),
+            })
+
+    return findings
+
+
+def detect_script_type_mixing(g):
+    """Detect transactions that mix different input script types."""
+    findings = []
+
+    for txid in g.our_txids:
+        input_addrs = g.get_input_addresses(txid)
+        if len(input_addrs) < 2:
+            continue
+
+        our_in = [ia for ia in input_addrs if g.is_ours(ia["address"])]
+        if len(our_in) < 2:
+            continue
+
+        types = {g.get_script_type(ia["address"]) for ia in input_addrs}
+        types.discard("unknown")
+
+        if len(types) >= 2:
+            findings.append({
+                "type": "SCRIPT_TYPE_MIXING",
+                "severity": "HIGH",
+                "description": (
+                    f"TX {txid[:16]}\u2026 mixes input script types: {sorted(types)}. "
+                    "Each type combination is a rare fingerprint."
+                ),
+                "details": {
+                    "txid": txid,
+                    "script_types": sorted(types),
+                    "inputs": [
+                        {
+                            "address": ia["address"],
+                            "script_type": g.get_script_type(ia["address"]),
+                            "ours": g.is_ours(ia["address"]),
+                        }
+                        for ia in input_addrs
+                    ],
+                },
+                "correction": (
+                    "Migrate all funds to a single address type — preferably Taproot (P2TR / bc1p). "
+                    "Never mix P2PKH, P2SH-P2WPKH, P2WPKH, and P2TR inputs in the same transaction. "
+                    "Sweep legacy UTXOs to a fresh Taproot wallet through a CoinJoin to avoid the cross-type link."
+                ),
+            })
+
+    return findings
+
+
+def detect_cluster_merge(g):
+    """
+    Detect transactions that merge UTXOs from different funding chains
+    (cross-origin input mixing).
+    """
+    findings = []
+
+    for txid in g.our_txids:
+        input_addrs = g.get_input_addresses(txid)
+        if len(input_addrs) < 2:
+            continue
+
+        our_in = [ia for ia in input_addrs if g.is_ours(ia["address"])]
+        if len(our_in) < 2:
+            continue
+
+        funding_sources = {}
+        for ia in our_in:
+            parent = g.fetch_tx(ia["txid"])
+            if not parent:
+                continue
+            gp_sources = set()
+            for p_vin in parent.get("vin", []):
+                if p_vin.get("coinbase"):
+                    gp_sources.add("coinbase")
+                else:
+                    src = p_vin.get("txid", "")
+                    if src:
+                        gp_sources.add(src[:16])
+            if gp_sources:
+                funding_sources[f"{ia['txid'][:16]}:{ia['vout']}"] = gp_sources
+
+        all_sources = list(funding_sources.values())
+        if len(all_sources) >= 2:
+            merged_clusters = any(
+                all_sources[i].isdisjoint(all_sources[j])
+                for i in range(len(all_sources))
+                for j in range(i + 1, len(all_sources))
+            )
+            if merged_clusters:
+                findings.append({
+                    "type": "CLUSTER_MERGE",
+                    "severity": "HIGH",
+                    "description": (
+                        f"TX {txid[:16]}\u2026 merges UTXOs from "
+                        f"{len(funding_sources)} different funding chains."
+                    ),
+                    "details": {
+                        "txid": txid,
+                        "funding_sources": {k: sorted(v) for k, v in funding_sources.items()},
+                    },
+                    "correction": (
+                        "Use coin control to spend UTXOs from only one funding source per transaction. "
+                        "Keep UTXOs received from different counterparties in separate wallets or accounts. "
+                        "If you must merge UTXOs from different origins, pass them through a CoinJoin first."
+                    ),
+                })
+
+    return findings
+
+
+def detect_utxo_age_spread(g):
+    """
+    Detect UTXOs with significantly different ages (dormancy patterns).
+    Uses blockheight from Esplora status instead of confirmation count.
+    """
+    findings = []
+
+    our_utxos = [u for u in g.utxos if g.is_ours(u.get("address", ""))]
+    if len(our_utxos) < 2:
+        return findings
+
+    # Filter to UTXOs with known blockheight
+    aged = [u for u in our_utxos if u.get("blockheight", 0) > 0]
+    if len(aged) < 2:
+        return findings
+
+    aged.sort(key=lambda x: x["blockheight"])
+    oldest = aged[0]
+    newest = aged[-1]
+    spread = newest["blockheight"] - oldest["blockheight"]
+
+    if spread < 10:
+        return findings
+
+    findings.append({
+        "type": "UTXO_AGE_SPREAD",
+        "severity": "LOW",
+        "description": (
+            f"UTXO age spread of {spread:,} blocks between oldest "
+            f"(block {oldest['blockheight']:,}) and newest (block {newest['blockheight']:,})."
+        ),
+        "details": {
+            "spread_blocks": spread,
+            "oldest": {
+                "txid": oldest["txid"],
+                "blockheight": oldest["blockheight"],
+                "amount_btc": round(oldest["amount"], 8),
+            },
+            "newest": {
+                "txid": newest["txid"],
+                "blockheight": newest["blockheight"],
+                "amount_btc": round(newest["amount"], 8),
+            },
+        },
+        "correction": (
+            "Prefer spending older UTXOs first (FIFO coin selection) to normalize the age distribution. "
+            "Route very old UTXOs through a CoinJoin to reset their history before spending. "
+            "Avoid holding long-dormant coins in the same wallet as freshly received funds."
+        ),
+    })
+
+    OLD_THRESHOLD = 100  # blocks
+    old_utxos = [u for u in aged if (newest["blockheight"] - u["blockheight"]) >= OLD_THRESHOLD]
+    if old_utxos:
+        findings.append({
+            "type": "DORMANT_UTXOS",
+            "severity": "LOW",
+            "description": (
+                f"{len(old_utxos)} UTXO(s) are significantly older than the newest "
+                f"(>= {OLD_THRESHOLD} blocks gap) — dormant/hoarded coin pattern."
+            ),
+            "details": {
+                "count": len(old_utxos),
+                "threshold_blocks": OLD_THRESHOLD,
+                "utxos": [
+                    {"txid": u["txid"], "blockheight": u["blockheight"], "amount_btc": round(u["amount"], 8)}
+                    for u in old_utxos[:5]
+                ],
+            },
+            "correction": (
+                "Avoid leaving very old coins as obvious dormancy markers. "
+                "Route them through a CoinJoin to reset history, or spend with FIFO coin selection."
+            ),
+        })
+
+    return findings
+
+
+def detect_exchange_origin(g):
+    """
+    Detect UTXOs that likely originated from exchange batch withdrawals.
+    Uses output count, unique recipient count, and input/output ratio heuristics.
+    """
+    findings = []
+    BATCH_THRESHOLD = 5
+
+    for txid in g.our_txids:
+        tx = g.fetch_tx(txid)
+        if not tx:
+            continue
+
+        vouts = tx.get("vout", [])
+        n_out = len(vouts)
+        if n_out < BATCH_THRESHOLD:
+            continue
+
+        our_inputs = [ia for ia in g.get_input_addresses(txid) if g.is_ours(ia["address"])]
+        our_outputs = g.get_output_addresses(txid)
+        our_outputs = [o for o in our_outputs if g.is_ours(o["address"])]
+
+        if our_inputs:
+            # We're a sender in a many-output TX — that's our batch, not exchange
+            continue
+        if not our_outputs:
+            continue
+
+        signals = []
+        signals.append(f"High output count: {n_out}")
+
+        unique_addrs = {
+            vout.get("scriptpubkey_address", "")
+            for vout in vouts
+            if vout.get("scriptpubkey_address")
+        }
+        if len(unique_addrs) >= BATCH_THRESHOLD:
+            signals.append(f"{len(unique_addrs)} unique recipient addresses")
+
+        input_addrs = g.get_input_addresses(txid)
+        input_total = sum(ia["value"] for ia in input_addrs)
+        output_vals = sorted(vout.get("value", 0) / 100_000_000 for vout in vouts)
+        if output_vals:
+            median_out = output_vals[len(output_vals) // 2]
+            if median_out > 0:
+                ratio = input_total / median_out
+                if ratio > 10:
+                    signals.append(f"Input/median-output ratio: {ratio:.0f}x (hot wallet pattern)")
+
+        if len(signals) >= 2:
+            findings.append({
+                "type": "EXCHANGE_ORIGIN",
+                "severity": "MEDIUM",
+                "description": (
+                    f"TX {txid[:16]}\u2026 looks like an exchange batch withdrawal "
+                    f"({len(signals)} signal(s) matched)."
+                ),
+                "details": {
+                    "txid": txid,
+                    "signals": signals,
+                    "received_outputs": [
+                        {"address": o["address"], "amount_btc": round(o["value"], 8)}
+                        for o in our_outputs
+                    ],
+                },
+                "correction": (
+                    "Withdraw via Lightning Network instead of on-chain to avoid the exchange-origin fingerprint. "
+                    "If on-chain withdrawal is required, pass the UTXO through a CoinJoin before using it for "
+                    "other payments so the exchange link is severed from your subsequent spending history."
+                ),
+            })
+
+    return findings
+
+
+def detect_behavioral_fingerprint(g):
+    """
+    Analyze transaction set for behavioral patterns that make the user
+    identifiable through consistency: round amounts, output count uniformity,
+    RBF signaling, locktime, fee rate, change/payment type mismatch.
+    """
+    findings = []
+
+    send_txids = []
+    for txid in g.our_txids:
+        input_addrs = g.get_input_addresses(txid)
+        our_in = [ia for ia in input_addrs if g.is_ours(ia["address"])]
+        if our_in:
+            send_txids.append(txid)
+
+    if len(send_txids) < 3:
+        return findings
+
+    output_counts = []
+    payment_amounts_sats = []
+    input_script_types = []
+    rbf_signals = []
+    locktime_values = []
+    fee_rates = []
+    n_inputs_list = []
+    uses_round_amounts = 0
+    total_payments = 0
+    change_address_types_used = set()
+    payment_address_types_used = set()
+
+    for txid in send_txids:
+        tx = g.fetch_tx(txid)
+        if not tx:
+            continue
+
+        vins = tx.get("vin", [])
+        vouts = tx.get("vout", [])
+        n_inputs_list.append(len(vins))
+        output_counts.append(len(vouts))
+        locktime_values.append(tx.get("locktime", 0))
+
+        for vin in vins:
+            seq = vin.get("sequence", 0xffffffff)
+            rbf_signals.append(seq < 0xfffffffe)
+
+        for ia in g.get_input_addresses(txid):
+            if g.is_ours(ia["address"]):
+                input_script_types.append(g.get_script_type(ia["address"]))
+
+        for out in g.get_output_addresses(txid):
+            sats = satoshis(out["value"])
+            if g.is_ours(out["address"]):
+                change_address_types_used.add(out["type"])
+            else:
+                payment_amounts_sats.append(sats)
+                payment_address_types_used.add(out["type"])
+                total_payments += 1
+                if sats > 0 and (sats % 100_000 == 0 or sats % 1_000_000 == 0):
+                    uses_round_amounts += 1
+
+        # Fee rate from Esplora fee field
+        fee = tx.get("fee", 0)
+        weight = tx.get("weight", 0)
+        vsize = max(1, (weight + 3) // 4) if weight else 0
+        if vsize > 0 and fee > 0:
+            fee_rates.append(fee / vsize)
+
+    problems = []
+
+    # 1. Round amounts
+    if total_payments > 0:
+        round_pct = uses_round_amounts / total_payments * 100
+        if round_pct > 60:
+            problems.append(
+                f"Round payment amounts: {round_pct:.0f}% of payments are round numbers — "
+                "a distinctive behavioral pattern that aids clustering."
+            )
+
+    # 2. Uniform output count
+    if output_counts and all(c == output_counts[0] for c in output_counts) and len(output_counts) >= 3:
+        problems.append(
+            f"Uniform output count: all {len(output_counts)} send TXs have exactly "
+            f"{output_counts[0]} outputs — consistent structure aids fingerprinting."
+        )
+
+    # 3. Script type consistency / legacy usage
+    input_types_set = set(input_script_types)
+    if len(input_types_set) > 1:
+        problems.append(
+            f"Mixed input script types across TXs: {input_types_set} — "
+            "mixing address families is rare and highly identifying."
+        )
+    elif "p2pkh" in input_types_set:
+        problems.append(
+            "All inputs use legacy P2PKH — uncommon today. "
+            "This alone narrows your anonymity set significantly."
+        )
+
+    # 4. RBF signaling consistency
+    if rbf_signals:
+        rbf_pct = sum(rbf_signals) / len(rbf_signals) * 100
+        if rbf_pct == 100:
+            problems.append(
+                "RBF always enabled: 100% of inputs signal replace-by-fee — "
+                "distinguishing feature vs non-RBF wallets."
+            )
+        elif rbf_pct == 0:
+            problems.append(
+                "RBF never enabled: 0% of inputs signal replace-by-fee — "
+                "uncommon in modern wallets, distinguishes your software."
+            )
+
+    # 5. Locktime pattern
+    if locktime_values and len(locktime_values) >= 3:
+        nonzero_lt = [lt for lt in locktime_values if lt > 0]
+        if len(nonzero_lt) == len(locktime_values):
+            problems.append(
+                "Anti-fee-sniping locktime always set — consistent with Bitcoin Core / Electrum. "
+                "Reveals your wallet software."
+            )
+        elif not nonzero_lt:
+            problems.append(
+                "Locktime always 0 — no anti-fee-sniping. "
+                "Distinguishes your wallet from Bitcoin Core / Electrum defaults."
+            )
+
+    # 6. Fee rate consistency
+    if len(fee_rates) >= 3:
+        avg_fee = sum(fee_rates) / len(fee_rates)
+        if avg_fee > 0:
+            variance = sum((f - avg_fee) ** 2 for f in fee_rates) / len(fee_rates)
+            stddev = variance ** 0.5
+            cv = stddev / avg_fee
+            if cv < 0.15:
+                problems.append(
+                    f"Very consistent fee rate: avg {avg_fee:.1f} sat/vB ± {stddev:.1f} "
+                    f"(CV={cv:.2f}) — low variance suggests fixed-fee-rate wallet configuration."
+                )
+
+    # 7. Change/payment script type mismatch
+    if change_address_types_used and payment_address_types_used:
+        if change_address_types_used != payment_address_types_used:
+            problems.append(
+                f"Change uses different script type ({change_address_types_used}) than "
+                f"payments ({payment_address_types_used}) — trivially identifies change outputs."
+            )
+
+    # 8. Unusual input count uniformity
+    if n_inputs_list and len(n_inputs_list) >= 3:
+        if all(n == n_inputs_list[0] for n in n_inputs_list) and n_inputs_list[0] > 1:
+            problems.append(
+                f"Always uses exactly {n_inputs_list[0]} inputs per TX — unusual and identifying."
+            )
+
+    if problems:
+        findings.append({
+            "type": "BEHAVIORAL_FINGERPRINT",
+            "severity": "MEDIUM",
+            "description": (
+                f"Behavioral fingerprint detected across {len(send_txids)} send transactions "
+                f"({len(problems)} pattern(s))."
+            ),
+            "details": {
+                "send_tx_count": len(send_txids),
+                "patterns": problems,
+            },
+            "correction": (
+                "Switch to wallet software that applies anti-fingerprinting defaults: anti-fee-sniping locktime, "
+                "randomized fee rates, and RBF enabled by default. "
+                "Avoid sending only round amounts — add small random satoshi offsets to payment values. "
+                "Standardize on Taproot so your input-type set is not distinctive."
+            ),
+        })
+
     return findings
 
 
@@ -602,10 +1248,7 @@ def detect_fee_fingerprinting(g):
                 "external_output_count": len(external_outputs),
             })
 
-        our_outputs = [
-            vout for vout in vouts
-            if g.is_ours(vout.get("scriptpubkey_address", ""))
-        ]
+        our_outputs = [vout for vout in vouts if g.is_ours(vout.get("scriptpubkey_address", ""))]
         non_our_outputs = [
             vout for vout in vouts
             if not g.is_ours(vout.get("scriptpubkey_address", ""))
@@ -700,12 +1343,31 @@ def scan_branch(parsed, offset, count, branch):
 
     findings = []
     warnings = []
+
+    # Original detectors
     findings.extend(detect_address_reuse(graph))
     findings.extend(detect_dust(graph))
+    findings.extend(detect_dust_spending(graph))
     findings.extend(detect_cioh(graph))
     findings.extend(detect_payjoin_interaction(graph))
     findings.extend(detect_whirlpool_patterns(graph))
     findings.extend(detect_fee_fingerprinting(graph))
+
+    # Ported from detect.py
+    findings.extend(detect_change_detection(graph))
+    findings.extend(detect_consolidation(graph))
+    findings.extend(detect_script_type_mixing(graph))
+    findings.extend(detect_cluster_merge(graph))
+    findings.extend(detect_exchange_origin(graph))
+    findings.extend(detect_behavioral_fingerprint(graph))
+
+    # Age/dormancy — some findings go into warnings
+    age_findings = detect_utxo_age_spread(graph)
+    for f in age_findings:
+        if f["type"] == "DORMANT_UTXOS":
+            warnings.append(f)
+        else:
+            findings.append(f)
 
     return {
         "scan_window": {
@@ -767,8 +1429,7 @@ def _merge_branch_reports(reports):
             addr = w.get("address") or (w.get("details") or {}).get("address", "")
             key = f"{w['type']}::{addr}::{txid}::{w.get('description', '')}"
             if key not in seen_finding_keys:
-                seen_finding_keys.add(key)
-                all_warnings.append(w)
+                seen_finding_keys.add(key)\n                all_warnings.append(w)
 
     return {
         "stats": {
