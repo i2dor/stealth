@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import styles from './LoadingScreen.module.css'
 
 const MESSAGES_MANUAL = [
@@ -43,15 +43,44 @@ const PRIVACY_TIPS = [
   "🔑 BIP47 reusable payment codes let you receive payments without reusing addresses publicly.",
   "📐 Equal-output CoinJoins are the strongest on-chain privacy tool — outputs of the same size are indistinguishable.",
   "🛡️ The safest UTXO strategy: spend UTXOs from the same source together, never mix sources.",
+  "🧱 UTXO consolidation is a privacy risk — merging many small UTXOs reveals they all belong to you.",
+  "🔍 Blockchain explorers log your IP when you look up your own transactions — use Tor or a VPN.",
+  "📦 Large UTXO sets slow down your wallet and increase your on-chain footprint — consolidate privately via CoinJoin.",
+  "🎯 Avoid spending change immediately after receiving it — the timing creates a strong link between sender and receiver.",
+  "🗂️ Labelling your UTXOs in your wallet (e.g. 'KYC exchange', 'P2P buy') prevents accidental mixing.",
+  "🔐 Hardware wallets sign transactions offline — but they can still leak your xpub to a compromised host.",
+  "📡 SPV wallets (like Electrum without your own server) leak all your addresses to the server operator.",
+  "🏦 KYC exchange outputs are tainted — spending them alongside non-KYC UTXOs links your identity to both.",
+  "🔀 Payjoin breaks the assumption that all inputs in a transaction belong to the same person.",
+  "🎲 Randomise your transaction output ordering — some wallets always put change last, making it easy to identify.",
+  "🕰️ Avoid broadcasting transactions at predictable times — patterns in timing can correlate to your timezone.",
+  "📉 Avoid creating tiny change outputs (below dust threshold) — they can't be spent and reveal your wallet type.",
+  "🧮 Check your wallet's change address gap limit — if too small, it may miss UTXOs on a restore.",
+  "🔏 Silent payments (BIP352) let you receive funds at a static address without any on-chain address reuse.",
+  "🌍 Multi-path payments on Lightning split your payment across channels, reducing traceability even further.",
+  "🧩 Coinjoin entropy (measured in bits) tells you how hard it is to de-mix outputs — aim for >50 bits.",
+  "🚧 Avoid using the same wallet for both savings (cold) and spending (hot) — keep UTXOs strictly separated.",
+  "⚠️ Watch-only wallets connected to a public Electrum server expose every address you monitor.",
+  "🗝️ Multisig setups reveal their policy on-chain unless you use MuSig2 (Taproot key-path spend).",
+  "📲 Mobile wallets that use a centralised API (e.g. Blockchain.com) send your addresses to their servers.",
 ]
+
+function shuffle(arr) {
+  const a = [...arr]
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]]
+  }
+  return a
+}
 
 export default function LoadingScreen({ descriptor, autoMode = false }) {
   const MESSAGES = autoMode ? MESSAGES_AUTO : MESSAGES_MANUAL
   const [msgIndex, setMsgIndex] = useState(0)
   const [elapsed, setElapsed] = useState(0)
   const [tipIndex, setTipIndex] = useState(0)
-  const [tipVisible, setTipVisible] = useState(false)
   const [tipFade, setTipFade] = useState(true)
+  const shuffledTips = useRef(shuffle(PRIVACY_TIPS))
 
   // rotate scan status messages
   useEffect(() => {
@@ -70,17 +99,16 @@ export default function LoadingScreen({ descriptor, autoMode = false }) {
     return () => clearInterval(timerInterval)
   }, [])
 
-  // show tips after 10s, rotate every 5s with fade
+  // show first tip immediately (elapsed=1), then rotate every 5s
   useEffect(() => {
-    if (elapsed === 10) {
+    if (elapsed === 1) {
       setTipIndex(0)
       setTipFade(true)
-      setTipVisible(true)
     }
-    if (elapsed > 10 && (elapsed - 10) % 5 === 0) {
+    if (elapsed > 1 && (elapsed - 1) % 5 === 0) {
       setTipFade(false)
       setTimeout(() => {
-        setTipIndex((i) => (i + 1) % PRIVACY_TIPS.length)
+        setTipIndex((i) => (i + 1) % shuffledTips.current.length)
         setTipFade(true)
       }, 400)
     }
@@ -134,14 +162,14 @@ export default function LoadingScreen({ descriptor, autoMode = false }) {
         <div className={styles.progressFill} />
       </div>
 
-      {tipVisible && (
+      {elapsed >= 1 && (
         <div
           className={styles.tipBox}
           style={{ opacity: tipFade ? 1 : 0, transition: 'opacity 0.4s ease' }}
         >
           <div className={styles.tipLabel}>Privacy tip</div>
-          <div className={styles.tipText}>{PRIVACY_TIPS[tipIndex]}</div>
-          <div className={styles.tipCounter}>{tipIndex + 1} / {PRIVACY_TIPS.length}</div>
+          <div className={styles.tipText}>{shuffledTips.current[tipIndex]}</div>
+          <div className={styles.tipCounter}>{tipIndex + 1} / {shuffledTips.current.length}</div>
         </div>
       )}
     </div>

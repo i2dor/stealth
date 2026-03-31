@@ -91,7 +91,6 @@ export default function ReportScreen({
   const totalFrom = aggregateWindow?.from_index ?? fromIndex
   const totalTo = aggregateWindow?.to_index ?? toIndex
 
-  // Use offset prop (from App state) for reliable first-batch detection
   const isFirstBatch = (offset ?? 0) === 0
 
   return (
