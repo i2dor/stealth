@@ -74,13 +74,36 @@ function shuffle(arr) {
   return a
 }
 
-export default function LoadingScreen({ descriptor, autoMode = false }) {
+// Typical durations in seconds for estimating ETA
+// Manual scan ~60 addresses: ~15-40s depending on wallet activity
+// Auto scan: ~20-120s depending on gap limit hits
+const MANUAL_TYPICAL_DURATION = 25 // seconds, median for a quiet wallet
+const AUTO_TYPICAL_DURATION = 60  // seconds, median for auto scan
+
+export default function LoadingScreen({ descriptor, autoMode = false, addressCount = 60 }) {
   const MESSAGES = autoMode ? MESSAGES_AUTO : MESSAGES_MANUAL
   const [msgIndex, setMsgIndex] = useState(0)
   const [elapsed, setElapsed] = useState(0)
   const [tipIndex, setTipIndex] = useState(0)
   const [tipFade, setTipFade] = useState(true)
   const shuffledTips = useRef(shuffle(PRIVACY_TIPS))
+
+  // ETA estimation: use a weighted blend of
+  // (a) typical duration for this scan type
+  // (b) if elapsed > 50% of typical, extrapolate linearly
+  const typicalDuration = autoMode ? AUTO_TYPICAL_DURATION : MANUAL_TYPICAL_DURATION
+
+  // Progress 0→1 capped at 0.95 so bar never "completes"
+  const progressFraction = Math.min(0.95, elapsed / typicalDuration)
+
+  // ETA: only show after 4s, hide once elapsed > typical (we're past the estimate)
+  let etaText = null
+  if (elapsed >= 4 && elapsed < typicalDuration * 1.5) {
+    const remaining = Math.max(1, Math.round(typicalDuration - elapsed))
+    if (remaining > 3) {
+      etaText = `ETA ~${remaining}s`
+    }
+  }
 
   useEffect(() => {
     setMsgIndex(0)
@@ -149,14 +172,20 @@ export default function LoadingScreen({ descriptor, autoMode = false }) {
         <div className={styles.timer}>
           <span className={styles.timerIcon}>\u23f1</span>
           {formatTime(elapsed)}
-          {slowNote && (
+          {etaText && (
+            <span className={styles.timerEta}>{etaText}</span>
+          )}
+          {!etaText && slowNote && (
             <span className={styles.timerNote}>{slowNote}</span>
           )}
         </div>
       </div>
 
       <div className={styles.progressBar}>
-        <div className={styles.progressFill} />
+        <div
+          className={styles.progressFill}
+          style={{ width: `${progressFraction * 100}%` }}
+        />
       </div>
 
       {elapsed >= 1 && (

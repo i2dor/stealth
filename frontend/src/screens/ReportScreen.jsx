@@ -1,3 +1,4 @@
+import { useRef } from 'react'
 import FindingCard from '../components/FindingCard'
 import styles from './ReportScreen.module.css'
 
@@ -21,50 +22,289 @@ function exportJSON(aggregateReport, descriptor) {
   URL.revokeObjectURL(url)
 }
 
-function exportPDF(aggregateReport, descriptor) {
+async function exportPDF(aggregateReport, descriptor) {
+  // Dynamically load jsPDF from CDN
+  if (!window.jspdf) {
+    await new Promise((resolve, reject) => {
+      const script = document.createElement('script')
+      script.src = 'https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js'
+      script.onload = resolve
+      script.onerror = reject
+      document.head.appendChild(script)
+    })
+  }
+
+  const { jsPDF } = window.jspdf
+  const doc = new jsPDF({ unit: 'pt', format: 'a4' })
+
+  const PAGE_W = doc.internal.pageSize.getWidth()
+  const PAGE_H = doc.internal.pageSize.getHeight()
+  const MARGIN = 48
+  const CONTENT_W = PAGE_W - MARGIN * 2
+  let y = MARGIN
+
+  const COLORS = {
+    bg:       [15, 15, 18],
+    accent:   [0, 212, 170],
+    danger:   [255, 77, 109],
+    warning:  [244, 162, 97],
+    success:  [74, 222, 128],
+    muted:    [120, 120, 130],
+    text:     [220, 220, 225],
+    white:    [255, 255, 255],
+    divider:  [40, 40, 50],
+    criticalBg: [74, 16, 16],
+    highBg:   [61, 26, 26],
+    mediumBg: [46, 34,  8],
+    lowBg:    [15, 40, 24],
+    infoBg:   [17, 24, 39],
+  }
+
+  const SEVERITY_COLORS = {
+    CRITICAL: { bg: COLORS.criticalBg, text: [255, 107, 107] },
+    HIGH:     { bg: COLORS.highBg,     text: [248, 113, 113] },
+    MEDIUM:   { bg: COLORS.mediumBg,   text: [251, 191,  36] },
+    LOW:      { bg: COLORS.lowBg,      text: [ 74, 222, 128] },
+    INFO:     { bg: COLORS.infoBg,     text: [148, 163, 184] },
+  }
+
+  function newPageIfNeeded(needed = 40) {
+    if (y + needed > PAGE_H - MARGIN) {
+      doc.addPage()
+      // dark bg for new page
+      doc.setFillColor(...COLORS.bg)
+      doc.rect(0, 0, PAGE_W, PAGE_H, 'F')
+      y = MARGIN
+      return true
+    }
+    return false
+  }
+
+  function hline(color = COLORS.divider) {
+    newPageIfNeeded(8)
+    doc.setDrawColor(...color)
+    doc.setLineWidth(0.5)
+    doc.line(MARGIN, y, PAGE_W - MARGIN, y)
+    y += 10
+  }
+
+  function text(str, x, size, color, opts = {}) {
+    doc.setFontSize(size)
+    doc.setTextColor(...color)
+    const lines = doc.splitTextToSize(String(str), opts.maxWidth || CONTENT_W)
+    doc.text(lines, x, y, opts)
+    return lines.length
+  }
+
+  // ── DARK BACKGROUND (page 1) ──────────────────────────────
+  doc.setFillColor(...COLORS.bg)
+  doc.rect(0, 0, PAGE_W, PAGE_H, 'F')
+
+  // ── HEADER BAND ───────────────────────────────────────────
+  doc.setFillColor(0, 180, 145)
+  doc.rect(0, 0, PAGE_W, 6, 'F')
+
+  y = 42
+  doc.setFontSize(22)
+  doc.setFont('helvetica', 'bold')
+  doc.setTextColor(...COLORS.white)
+  doc.text('STEAL', MARGIN, y)
+  const stealW = doc.getTextWidth('STEAL')
+  doc.setTextColor(...COLORS.accent)
+  doc.text('TH', MARGIN + stealW, y)
+
+  doc.setFontSize(10)
+  doc.setFont('helvetica', 'normal')
+  doc.setTextColor(...COLORS.muted)
+  doc.text('Bitcoin Wallet Privacy Report', MARGIN, y + 16)
+  doc.text(`Generated: ${new Date().toLocaleString()}`, PAGE_W - MARGIN, y + 16, { align: 'right' })
+
+  y = 90
+  hline(COLORS.accent)
+
+  // ── DESCRIPTOR ────────────────────────────────────────────
   const stats = aggregateReport?.stats || {}
   const findings = aggregateReport?.findings || []
   const warnings = aggregateReport?.warnings || []
   const window_ = aggregateReport?.aggregate_scan_window || {}
 
-  const lines = []
-  lines.push('STEALTH — Bitcoin Wallet Privacy Report')
-  lines.push('='.repeat(60))
-  lines.push(`Generated: ${new Date().toLocaleString()}`)
-  lines.push(`Descriptor: ${descriptor ? descriptor.slice(0, 60) + '...' : 'n/a'}`)
-  lines.push(`Addresses scanned: ${window_.from_index ?? 0} – ${window_.to_index ?? 0}`)
-  lines.push(`Transactions analyzed: ${stats.transactions_analyzed || 0}`)
-  lines.push('')
-  lines.push(`SUMMARY: ${findings.length} finding(s), ${warnings.length} warning(s)`)
-  lines.push('')
+  doc.setFontSize(8)
+  doc.setFont('helvetica', 'bold')
+  doc.setTextColor(...COLORS.muted)
+  doc.text('DESCRIPTOR', MARGIN, y)
+  y += 12
+  doc.setFont('courier', 'normal')
+  doc.setFontSize(9)
+  doc.setTextColor(...COLORS.text)
+  const descStr = descriptor ? (descriptor.length > 100 ? descriptor.slice(0, 100) + '…' : descriptor) : 'n/a'
+  const descLines = doc.splitTextToSize(descStr, CONTENT_W)
+  doc.text(descLines, MARGIN, y)
+  y += descLines.length * 12 + 14
 
+  // ── SCAN WINDOW ───────────────────────────────────────────
+  doc.setFont('helvetica', 'normal')
+  doc.setFontSize(9)
+  doc.setTextColor(...COLORS.muted)
+  doc.text(`Addresses scanned: ${window_.from_index ?? 0} – ${window_.to_index ?? 0}`, MARGIN, y)
+  doc.text(`Transactions analyzed: ${stats.transactions_analyzed || 0}`, MARGIN + 180, y)
+  doc.text(`UTXOs found: ${stats.utxos_found || 0}`, MARGIN + 360, y)
+  y += 22
+
+  hline()
+
+  // ── SUMMARY BOXES ─────────────────────────────────────────
+  const boxW = (CONTENT_W - 16) / 3
+  const boxes = [
+    { label: 'Findings', value: findings.length, color: findings.length > 0 ? COLORS.danger : COLORS.accent },
+    { label: 'Warnings', value: warnings.length, color: warnings.length > 0 ? COLORS.warning : COLORS.muted },
+    { label: 'Txs Analyzed', value: stats.transactions_analyzed || 0, color: COLORS.text },
+  ]
+  boxes.forEach((box, i) => {
+    const bx = MARGIN + i * (boxW + 8)
+    doc.setFillColor(25, 25, 32)
+    doc.roundedRect(bx, y, boxW, 48, 4, 4, 'F')
+    doc.setFontSize(22)
+    doc.setFont('helvetica', 'bold')
+    doc.setTextColor(...box.color)
+    doc.text(String(box.value), bx + boxW / 2, y + 26, { align: 'center' })
+    doc.setFontSize(8)
+    doc.setFont('helvetica', 'normal')
+    doc.setTextColor(...COLORS.muted)
+    doc.text(box.label.toUpperCase(), bx + boxW / 2, y + 40, { align: 'center' })
+  })
+  y += 64
+
+  hline()
+
+  // ── FINDINGS ──────────────────────────────────────────────
   if (findings.length > 0) {
-    lines.push('FINDINGS')
-    lines.push('-'.repeat(40))
-    findings.forEach((f, i) => {
-      lines.push(`${i + 1}. [${f.severity}] ${f.type} — ${f.description}`)
-      if (f.correction) lines.push(`   Fix: ${f.correction}`)
+    doc.setFontSize(11)
+    doc.setFont('helvetica', 'bold')
+    doc.setTextColor(...COLORS.white)
+    doc.text('FINDINGS', MARGIN, y)
+    y += 18
+
+    findings.forEach((f, idx) => {
+      newPageIfNeeded(60)
+      const sev = f.severity || 'INFO'
+      const sc = SEVERITY_COLORS[sev] || SEVERITY_COLORS.INFO
+
+      // Card background
+      doc.setFillColor(22, 22, 30)
+      doc.roundedRect(MARGIN, y, CONTENT_W, 10, 2, 2, 'F')
+
+      // Severity badge
+      doc.setFillColor(...sc.bg)
+      doc.roundedRect(MARGIN, y, 54, 18, 3, 3, 'F')
+      doc.setFontSize(7)
+      doc.setFont('helvetica', 'bold')
+      doc.setTextColor(...sc.text)
+      doc.text(sev, MARGIN + 27, y + 12, { align: 'center' })
+
+      // Type label
+      doc.setFontSize(8)
+      doc.setFont('helvetica', 'bold')
+      doc.setTextColor(...COLORS.muted)
+      doc.text(f.type || '', MARGIN + 62, y + 12)
+
+      y += 22
+
+      // Description
+      doc.setFont('helvetica', 'normal')
+      doc.setFontSize(9)
+      doc.setTextColor(...COLORS.text)
+      const descLines2 = doc.splitTextToSize(f.description || '', CONTENT_W - 8)
+      newPageIfNeeded(descLines2.length * 12 + 20)
+      doc.text(descLines2, MARGIN + 4, y)
+      y += descLines2.length * 12 + 4
+
+      // TXID if present
+      const txid = f.details?.txid
+      if (txid) {
+        doc.setFont('courier', 'normal')
+        doc.setFontSize(8)
+        doc.setTextColor(...COLORS.muted)
+        doc.text(`txid: ${txid}`, MARGIN + 4, y)
+        y += 12
+      }
+
+      // Correction
+      if (f.correction) {
+        newPageIfNeeded(30)
+        doc.setFont('helvetica', 'italic')
+        doc.setFontSize(8)
+        doc.setTextColor(0, 170, 136)
+        const fixLines = doc.splitTextToSize(`Fix: ${f.correction}`, CONTENT_W - 8)
+        doc.text(fixLines, MARGIN + 4, y)
+        y += fixLines.length * 11 + 4
+      }
+
+      if (idx < findings.length - 1) {
+        y += 6
+        doc.setDrawColor(...COLORS.divider)
+        doc.setLineWidth(0.3)
+        doc.line(MARGIN + 4, y, PAGE_W - MARGIN - 4, y)
+        y += 8
+      } else {
+        y += 10
+      }
     })
-    lines.push('')
   }
 
+  // ── WARNINGS ──────────────────────────────────────────────
   if (warnings.length > 0) {
-    lines.push('WARNINGS')
-    lines.push('-'.repeat(40))
-    warnings.forEach((w, i) => {
-      lines.push(`${i + 1}. [${w.severity}] ${w.type} — ${w.description}`)
+    newPageIfNeeded(50)
+    hline()
+    doc.setFontSize(11)
+    doc.setFont('helvetica', 'bold')
+    doc.setTextColor(...COLORS.white)
+    doc.text('WARNINGS', MARGIN, y)
+    y += 18
+
+    warnings.forEach((w, idx) => {
+      newPageIfNeeded(50)
+      const sev = w.severity || 'LOW'
+      const sc = SEVERITY_COLORS[sev] || SEVERITY_COLORS.LOW
+
+      doc.setFillColor(...sc.bg)
+      doc.roundedRect(MARGIN, y, 54, 18, 3, 3, 'F')
+      doc.setFontSize(7)
+      doc.setFont('helvetica', 'bold')
+      doc.setTextColor(...sc.text)
+      doc.text(sev, MARGIN + 27, y + 12, { align: 'center' })
+
+      doc.setFontSize(8)
+      doc.setFont('helvetica', 'bold')
+      doc.setTextColor(...COLORS.muted)
+      doc.text(w.type || '', MARGIN + 62, y + 12)
+      y += 22
+
+      doc.setFont('helvetica', 'normal')
+      doc.setFontSize(9)
+      doc.setTextColor(...COLORS.text)
+      const wLines = doc.splitTextToSize(w.description || '', CONTENT_W - 8)
+      doc.text(wLines, MARGIN + 4, y)
+      y += wLines.length * 12 + (idx < warnings.length - 1 ? 14 : 10)
     })
-    lines.push('')
   }
 
-  const content = lines.join('\n')
-  const blob = new Blob([content], { type: 'text/plain;charset=utf-8' })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = `stealth-report-${Date.now()}.txt`
-  a.click()
-  URL.revokeObjectURL(url)
+  // ── FOOTER ────────────────────────────────────────────────
+  const totalPages = doc.internal.getNumberOfPages()
+  for (let p = 1; p <= totalPages; p++) {
+    doc.setPage(p)
+    doc.setFontSize(7)
+    doc.setTextColor(...COLORS.muted)
+    doc.text(
+      `STEALTH — Bitcoin Wallet Privacy Analyzer  ·  stealth.vercel.app  ·  Page ${p} of ${totalPages}`,
+      PAGE_W / 2,
+      PAGE_H - 20,
+      { align: 'center' }
+    )
+    doc.setFillColor(0, 180, 145)
+    doc.rect(0, PAGE_H - 4, PAGE_W, 4, 'F')
+  }
+
+  doc.save(`stealth-report-${Date.now()}.pdf`)
 }
 
 export default function ReportScreen({
@@ -116,9 +356,9 @@ export default function ReportScreen({
               <button
                 className={styles.exportButton}
                 onClick={() => exportPDF(aggregate, descriptor)}
-                title="Export text report"
+                title="Export PDF report"
               >
-                ↓ TXT
+                ↓ PDF
               </button>
               <button className={styles.backButton} onClick={onReset}>
                 ← New Analysis
