@@ -2,6 +2,7 @@ import { useState } from 'react'
 import InputScreen from './screens/InputScreen'
 import LoadingScreen from './screens/LoadingScreen'
 import ReportScreen from './screens/ReportScreen'
+import SettingsScreen from './screens/SettingsScreen'
 import { analyzeWallet } from './services/walletService'
 
 const SCAN_BATCH_SIZE = 60
@@ -56,6 +57,19 @@ function mergeAggregateReports(prevAggregate, newReport) {
   }
 }
 
+const DEFAULT_SETTINGS = {
+  apiBase: '',
+  blockstreamUrl: 'https://blockstream.info/api',
+  mempoolUrl: 'https://mempool.space/api',
+  electrumHost: '',
+  electrumPort: '50002',
+  electrumSsl: true,
+  requestDelay: '300',
+  scanBatchSize: '60',
+  gapLimit: '20',
+  torProxy: '',
+}
+
 export default function App() {
   const [screen, setScreen] = useState('input')
   const [descriptor, setDescriptor] = useState('')
@@ -66,6 +80,7 @@ export default function App() {
   const [success, setSuccess] = useState('')
   const [offset, setOffset] = useState(0)
   const [reportCache, setReportCache] = useState({})
+  const [settings, setSettings] = useState(DEFAULT_SETTINGS)
 
   async function loadBatch(desc, nextOffset = 0, options = { extendAggregate: true }, scanOpts) {
     setDescriptor(desc)
@@ -80,7 +95,7 @@ export default function App() {
       setCurrentReport(cachedReport)
       setOffset(nextOffset)
       const hasIssues = (aggregateReport?.findings?.length || 0) > 0 || (aggregateReport?.warnings?.length || 0) > 0
-      setSuccess(hasIssues ? '' : 'Scan complete — no issues found.')
+      setSuccess(hasIssues ? '' : 'Scan complete \u2014 no issues found.')
       setScreen('report')
       return
     }
@@ -88,7 +103,8 @@ export default function App() {
     setScreen('loading')
 
     try {
-      const result = await analyzeWallet(desc, nextOffset, SCAN_BATCH_SIZE, opts)
+      const apiBase = settings.apiBase || ''
+      const result = await analyzeWallet(desc, nextOffset, parseInt(settings.scanBatchSize) || SCAN_BATCH_SIZE, opts, apiBase)
 
       console.log('Scan offset:', nextOffset, 'opts:', opts)
       console.log('Result:', result)
@@ -104,7 +120,7 @@ export default function App() {
       setOffset(nextOffset)
 
       const hasIssues = (computedAggregate?.findings?.length || 0) > 0 || (computedAggregate?.warnings?.length || 0) > 0
-      setSuccess(hasIssues ? '' : 'Scan complete — no issues found.')
+      setSuccess(hasIssues ? '' : 'Scan complete \u2014 no issues found.')
       setScreen('report')
     } catch (err) {
       console.error('Analysis failed:', err)
@@ -126,11 +142,12 @@ export default function App() {
   }
 
   async function handleScanNext() {
-    await loadBatch(descriptor, offset + SCAN_BATCH_SIZE, { extendAggregate: true })
+    await loadBatch(descriptor, offset + (parseInt(settings.scanBatchSize) || SCAN_BATCH_SIZE), { extendAggregate: true })
   }
 
   async function handleScanPrevious() {
-    const previousOffset = Math.max(0, offset - SCAN_BATCH_SIZE)
+    const batchSize = parseInt(settings.scanBatchSize) || SCAN_BATCH_SIZE
+    const previousOffset = Math.max(0, offset - batchSize)
     const cacheKey = `${descriptor}::${previousOffset}::${scanOptions.branch}::${scanOptions.auto}`
     if (reportCache[cacheKey]) {
       setCurrentReport(reportCache[cacheKey])
@@ -152,8 +169,23 @@ export default function App() {
     setReportCache({})
   }
 
+  function handleSaveSettings(newSettings) {
+    setSettings(newSettings)
+    setScreen('input')
+  }
+
   if (screen === 'loading') {
     return <LoadingScreen descriptor={descriptor} autoMode={scanOptions.auto} />
+  }
+
+  if (screen === 'settings') {
+    return (
+      <SettingsScreen
+        settings={settings}
+        onSave={handleSaveSettings}
+        onBack={() => setScreen('input')}
+      />
+    )
   }
 
   if (screen === 'report') {
@@ -172,5 +204,5 @@ export default function App() {
     )
   }
 
-  return <InputScreen onAnalyze={handleAnalyze} error={error} />
+  return <InputScreen onAnalyze={handleAnalyze} onSettings={() => setScreen('settings')} error={error} />
 }

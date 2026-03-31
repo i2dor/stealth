@@ -1,6 +1,4 @@
-const API_BASE = import.meta.env.VITE_API_BASE || ''
-
-export const analyzeWallet = async (descriptor, offset = 0, count = 60, options = {}) => {
+export const analyzeWallet = async (descriptor, offset = 0, count = 60, options = {}, apiBase = '') => {
   const { branch = 'receive', auto = false } = options
 
   const params = new URLSearchParams({
@@ -11,7 +9,8 @@ export const analyzeWallet = async (descriptor, offset = 0, count = 60, options 
     auto: auto ? '1' : '0',
   })
 
-  const url = `${API_BASE}/api/scan?${params.toString()}`
+  const base = apiBase || (typeof import.meta !== 'undefined' ? (import.meta.env.VITE_API_BASE || '') : '')
+  const url = `${base}/api/scan?${params.toString()}`
   const res = await fetch(url)
   const text = await res.text()
 

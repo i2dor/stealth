@@ -1,0 +1,236 @@
+.root {
+  flex: 1;
+  min-height: 100vh;
+  padding: 40px 24px 80px;
+}
+
+.container {
+  max-width: 680px;
+  margin: 0 auto;
+}
+
+/* Header */
+.header {
+  margin-bottom: 36px;
+}
+
+.backBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-muted);
+  font-family: var(--font-ui);
+  font-size: 13px;
+  font-weight: 500;
+  padding: 7px 14px;
+  cursor: pointer;
+  transition: border-color var(--transition), color var(--transition);
+  margin-bottom: 20px;
+}
+
+.backBtn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.titleRow {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+}
+
+.wordmark {
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--text);
+}
+
+.wordmark span {
+  color: var(--accent);
+}
+
+.pageTitle {
+  font-size: 13px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+}
+
+/* Sections */
+.section {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 24px;
+  margin-bottom: 16px;
+}
+
+.sectionHeader {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.sectionIcon {
+  font-size: 20px;
+  line-height: 1.3;
+  flex-shrink: 0;
+}
+
+.sectionTitle {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text);
+  margin-bottom: 3px;
+}
+
+.sectionDesc {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+/* Info box */
+.infoBox {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 11px 14px;
+  background: rgba(0, 212, 170, 0.05);
+  border: 1px solid rgba(0, 212, 170, 0.18);
+  border-radius: var(--radius);
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.6;
+  margin-bottom: 18px;
+}
+
+.infoBox code {
+  font-family: var(--font-data);
+  font-size: 11px;
+  background: rgba(255,255,255,0.07);
+  padding: 1px 5px;
+  border-radius: 3px;
+  color: var(--accent);
+}
+
+/* Fields */
+.fieldRow {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-bottom: 14px;
+  flex: 1;
+  min-width: 140px;
+}
+
+.label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--text-muted);
+}
+
+.fieldDesc {
+  font-size: 11px;
+  color: var(--text-dim);
+  line-height: 1.4;
+}
+
+.input {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-family: var(--font-data);
+  font-size: 13px;
+  padding: 9px 12px;
+  width: 100%;
+  transition: border-color var(--transition), box-shadow var(--transition);
+}
+
+.input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-dim);
+}
+
+.input::placeholder {
+  color: var(--text-dim);
+}
+
+/* Checkbox */
+.checkLabel {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-muted);
+  cursor: pointer;
+  user-select: none;
+}
+
+.checkbox {
+  width: 15px;
+  height: 15px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+/* Actions */
+.actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.resetBtn {
+  padding: 10px 18px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-muted);
+  font-family: var(--font-ui);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: border-color var(--transition), color var(--transition);
+}
+
+.resetBtn:hover {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.saveBtn {
+  padding: 10px 22px;
+  background: var(--accent);
+  border: none;
+  border-radius: var(--radius);
+  color: #080c14;
+  font-family: var(--font-ui);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  cursor: pointer;
+  transition: background var(--transition), box-shadow var(--transition);
+}
+
+.saveBtn:hover {
+  background: #00f0c2;
+  box-shadow: 0 0 16px var(--accent-glow);
+}

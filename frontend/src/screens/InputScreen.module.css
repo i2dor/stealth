@@ -18,17 +18,45 @@
   margin-bottom: 40px;
 }
 
+.logoRow {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  margin-bottom: 10px;
+}
+
 .logo {
   font-size: 40px;
   font-weight: 700;
   letter-spacing: -0.02em;
   color: var(--text);
   line-height: 1;
-  margin-bottom: 10px;
 }
 
 .logo span {
   color: var(--accent);
+}
+
+.settingsBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: border-color var(--transition), color var(--transition), background var(--transition);
+  flex-shrink: 0;
+}
+
+.settingsBtn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-dim);
 }
 
 .tagline {
@@ -102,7 +130,6 @@
   box-shadow: 0 0 0 3px var(--accent-dim);
 }
 
-/* Options row */
 .optionsRow {
   display: flex;
   gap: 24px;
@@ -125,7 +152,6 @@
   color: var(--text-muted);
 }
 
-/* Segmented control */
 .segmented {
   display: flex;
   background: var(--bg);
@@ -160,7 +186,6 @@
   font-weight: 700;
 }
 
-/* Auto gap toggle */
 .toggleBtn {
   display: flex;
   align-items: center;
@@ -197,7 +222,6 @@
   transition: background var(--transition);
 }
 
-/* Auto mode note */
 .autoNote {
   margin-top: 12px;
   padding: 10px 14px;
@@ -256,7 +280,6 @@
   color: var(--text-dim);
 }
 
-/* Alerts */
 .errorBox {
   margin-top: 12px;
   padding: 12px 14px;
@@ -270,7 +293,6 @@
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
 }
 
-/* Privacy notice */
 .privacyNotice {
   display: flex;
   align-items: flex-start;

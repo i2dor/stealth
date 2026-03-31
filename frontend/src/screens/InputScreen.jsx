@@ -3,7 +3,7 @@ import styles from './InputScreen.module.css'
 
 const PLACEHOLDER = `wpkh([a1b2c3d4/84h/0h/0h]xpub6CatWdiZynkCminahu8Gmr7FAVnQXBTSMaBxn6qmBNkdm9tDkFzWmjmDrLBCQSTa7BHgpEjCXzMTCyDsQLSmcGYJHBB7cTwpqLNRKGP47uw/0/*)#qwer1234`
 
-export default function InputScreen({ onAnalyze, error }) {
+export default function InputScreen({ onAnalyze, onSettings, error }) {
   const [descriptor, setDescriptor] = useState('')
   const [branch, setBranch] = useState('receive')
   const [autoGap, setAutoGap] = useState(false)
@@ -24,15 +24,29 @@ export default function InputScreen({ onAnalyze, error }) {
     <div className={styles.root}>
       <div className={styles.container}>
         <div className={styles.wordmark}>
-          <div className={styles.logo}>
-            STEAL<span>TH</span>
+          <div className={styles.logoRow}>
+            <div className={styles.logo}>
+              STEAL<span>TH</span>
+            </div>
+            <button
+              type="button"
+              className={styles.settingsBtn}
+              onClick={onSettings}
+              title="Settings"
+              aria-label="Open settings"
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="3"/>
+                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+              </svg>
+            </button>
           </div>
           <div className={styles.tagline}>Bitcoin Wallet Privacy Analyzer</div>
         </div>
 
         {showHttpsWarning && (
           <div className={styles.httpsWarning}>
-            <span className={styles.warnIcon}>⚠</span>
+            <span className={styles.warnIcon}>\u26a0</span>
             <span>
               <strong>Insecure connection detected.</strong> Use HTTPS to protect your descriptor from interception.
             </span>
@@ -55,7 +69,6 @@ export default function InputScreen({ onAnalyze, error }) {
             autoCapitalize="off"
           />
 
-          {/* Branch selector */}
           <div className={styles.optionsRow}>
             <div className={styles.optionGroup}>
               <span className={styles.optionLabel}>Branch</span>
@@ -89,7 +102,7 @@ export default function InputScreen({ onAnalyze, error }) {
 
           {autoGap && (
             <div className={styles.autoNote}>
-              ⚡ Will scan automatically until 20 consecutive inactive addresses are found (BIP44 standard). May take longer for large wallets.
+              \u26a1 Will scan automatically until 20 consecutive inactive addresses are found (BIP44 standard). May take longer for large wallets.
             </div>
           )}
 
@@ -109,7 +122,7 @@ export default function InputScreen({ onAnalyze, error }) {
         </form>
 
         <div className={styles.privacyNotice}>
-          <span className={styles.shieldIcon}>🔒</span>
+          <span className={styles.shieldIcon}>\ud83d\udd12</span>
           <span>
             Your descriptor is sent only to the analysis API and is <strong>never stored or logged</strong>.
             All processing happens server-side in an ephemeral context.
