@@ -5,7 +5,7 @@ import sys
 import os
 
 sys.path.insert(0, os.path.dirname(__file__))
-from detect_public import run_scan
+from detect_public import run_scan, run_auto_scan
 
 class handler(BaseHTTPRequestHandler):
 
@@ -16,12 +16,7 @@ class handler(BaseHTTPRequestHandler):
         descriptor = params.get("descriptor", [None])[0]
 
         if not descriptor:
-            self.send_response(400)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.end_headers()
-            body = json.dumps({"error": "Missing required query parameter: descriptor"})
-            self.wfile.write(body.encode())
+            self._json(400, {"error": "Missing required query parameter: descriptor"})
             return
 
         try:
@@ -34,27 +29,22 @@ class handler(BaseHTTPRequestHandler):
         except (ValueError, TypeError):
             count = 60
 
+        branch_mode = params.get("branch", ["receive"])[0]
+        if branch_mode not in ("receive", "change", "both"):
+            branch_mode = "receive"
+
+        auto = params.get("auto", ["0"])[0] in ("1", "true", "yes")
+
         try:
-            report = run_scan(descriptor, offset=offset, count=count)
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.end_headers()
-            self.wfile.write(json.dumps(report).encode())
+            if auto:
+                report = run_auto_scan(descriptor, branch_mode=branch_mode)
+            else:
+                report = run_scan(descriptor, offset=offset, count=count, branch_mode=branch_mode)
+            self._json(200, report)
         except ValueError as e:
-            self.send_response(400)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.end_headers()
-            body = json.dumps({"error": str(e)})
-            self.wfile.write(body.encode())
+            self._json(400, {"error": str(e)})
         except Exception as e:
-            self.send_response(500)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.end_headers()
-            body = json.dumps({"error": "Internal server error", "detail": str(e)})
-            self.wfile.write(body.encode())
+            self._json(500, {"error": "Internal server error", "detail": str(e)})
 
     def do_OPTIONS(self):
         self.send_response(200)
@@ -62,3 +52,11 @@ class handler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.end_headers()
+
+    def _json(self, status, data):
+        body = json.dumps(data).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(body)

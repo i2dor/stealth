@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import styles from './LoadingScreen.module.css'
 
-const MESSAGES = [
+const MESSAGES_MANUAL = [
   'Resolving descriptors',
   'Deriving addresses',
   'Importing & scanning blockchain',
@@ -9,16 +9,31 @@ const MESSAGES = [
   'Running vulnerability detectors',
 ]
 
-export default function LoadingScreen({ descriptor }) {
+const MESSAGES_AUTO = [
+  'Resolving descriptors',
+  'Deriving addresses',
+  'Scanning batch...',
+  'Checking gap limit',
+  'Loading transactions',
+  'Running vulnerability detectors',
+  'Scanning next batch...',
+  'Checking for address reuse',
+  'Checking for CIOH patterns',
+  'Checking gap limit',
+]
+
+export default function LoadingScreen({ descriptor, autoMode = false }) {
+  const MESSAGES = autoMode ? MESSAGES_AUTO : MESSAGES_MANUAL
   const [msgIndex, setMsgIndex] = useState(0)
   const [elapsed, setElapsed] = useState(0)
 
   useEffect(() => {
+    setMsgIndex(0)
     const msgInterval = setInterval(() => {
       setMsgIndex((i) => (i + 1) % MESSAGES.length)
-    }, 1000)
+    }, autoMode ? 2200 : 1000)
     return () => clearInterval(msgInterval)
-  }, [])
+  }, [autoMode])
 
   useEffect(() => {
     const timerInterval = setInterval(() => {
@@ -37,6 +52,12 @@ export default function LoadingScreen({ descriptor }) {
     return m > 0 ? `${m}m ${sec}s` : `${sec}s`
   }
 
+  const slowNote = autoMode
+    ? elapsed >= 15 ? ' — auto-scanning, checking gap limit...'
+      : elapsed >= 5 ? ' — scanning batches'
+      : ''
+    : elapsed >= 10 ? ' — large wallet, please wait' : ''
+
   return (
     <div className={styles.root}>
       <div className={styles.scanner}>
@@ -49,6 +70,9 @@ export default function LoadingScreen({ descriptor }) {
       </div>
 
       <div className={styles.status}>
+        {autoMode && (
+          <div className={styles.autoModeBadge}>⚡ Auto gap-limit scan</div>
+        )}
         <div key={msgIndex} className={styles.statusText}>
           {MESSAGES[msgIndex]}<span className={styles.dots}>...</span>
         </div>
@@ -56,8 +80,8 @@ export default function LoadingScreen({ descriptor }) {
         <div className={styles.timer}>
           <span className={styles.timerIcon}>⏱</span>
           {formatTime(elapsed)}
-          {elapsed >= 10 && (
-            <span className={styles.timerNote}> — large wallet, please wait</span>
+          {slowNote && (
+            <span className={styles.timerNote}>{slowNote}</span>
           )}
         </div>
       </div>

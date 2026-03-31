@@ -14,11 +14,13 @@ _primary = os.environ.get("ESPLORA_API_URL", "https://blockstream.info/api").rst
 _fallback = os.environ.get("ESPLORA_FALLBACK_URL", "https://mempool.space/api").rstrip("/")
 API_BASE = _primary
 
-# Rate limiting: delay between requests (seconds)
 REQUEST_DELAY = float(os.environ.get("REQUEST_DELAY", "0.25"))
-REQUEST_DELAY_LARGE = float(os.environ.get("REQUEST_DELAY_LARGE", "0.5"))  # used when offset > 100
+REQUEST_DELAY_LARGE = float(os.environ.get("REQUEST_DELAY_LARGE", "0.5"))
 MAX_RETRIES = 3
 RETRY_BACKOFF_BASE = 2.0
+GAP_LIMIT = int(os.environ.get("GAP_LIMIT", "20"))
+AUTO_BATCH_SIZE = int(os.environ.get("AUTO_BATCH_SIZE", "20"))
+MAX_AUTO_ADDRESSES = int(os.environ.get("MAX_AUTO_ADDRESSES", "500"))
 
 SLIP132_TO_BIP32 = {
     "xpub": ("0488b21e", "0488b21e"),
@@ -36,7 +38,6 @@ SLIP132_TO_BIP32 = {
 session = requests.Session()
 session.headers.update({"User-Agent": "Stealth-Wallet-Analyzer/1.0"})
 
-# Global request counter for rate limiting
 _request_count = 0
 _scan_start_offset = 0
 
@@ -47,11 +48,9 @@ def satoshis(btc):
     return int(round(float(btc) * 100_000_000))
 
 def _rate_limit_delay():
-    """Apply a delay between API requests to avoid IP rate limiting."""
     global _request_count
     _request_count += 1
     delay = REQUEST_DELAY_LARGE if _scan_start_offset > 100 else REQUEST_DELAY
-    # Every 10 requests, take a longer pause
     if _request_count % 10 == 0:
         time.sleep(delay * 3)
     else:
@@ -156,7 +155,6 @@ def derive_wpkh_addresses(extpub, count, branch, start_index=0):
     return addrs
 
 def api_get(path):
-    """Fetch from API with rate limiting and exponential backoff retry."""
     _rate_limit_delay()
     for attempt in range(MAX_RETRIES):
         for base in (_primary, _fallback):
@@ -164,9 +162,8 @@ def api_get(path):
                 url = f"{base}{path}"
                 r = session.get(url, timeout=(5, 15))
                 if r.status_code == 429:
-                    # Rate limited — wait longer before retrying
                     wait = RETRY_BACKOFF_BASE ** (attempt + 2)
-                    debug(f"Rate limited by {base}, waiting {wait:.1f}s before retry...")
+                    debug(f"Rate limited by {base}, waiting {wait:.1f}s...")
                     time.sleep(wait)
                     continue
                 r.raise_for_status()
@@ -433,12 +430,156 @@ def scan_branch(parsed, offset, count, branch):
             "warnings": len(warnings),
             "clean": len(findings) == 0 and len(warnings) == 0,
         },
+        "_active_addresses": active_addresses,
     }
 
 
-def run_scan(descriptor: str, offset: int = 0, count: int = 20) -> dict:
+def _merge_branch_reports(reports):
+    """Merge multiple branch scan reports into one aggregate."""
+    all_findings = []
+    all_warnings = []
+    total_txs = 0
+    total_utxos = 0
+    total_derived = 0
+    total_active = 0
+    from_index = None
+    to_index = None
+
+    seen_finding_keys = set()
+
+    for r in reports:
+        total_txs += r["stats"]["transactions_analyzed"]
+        total_utxos += r["stats"]["utxos_found"]
+        total_derived += r["stats"]["addresses_derived"]
+        total_active += r["stats"]["active_addresses"]
+
+        w = r["scan_window"]
+        from_index = w["from_index"] if from_index is None else min(from_index, w["from_index"])
+        to_index = w["to_index"] if to_index is None else max(to_index, w["to_index"])
+
+        for f in r["findings"]:
+            txid = f.get("txid") or (f.get("details") or {}).get("txid", "")
+            addr = f.get("address") or (f.get("details") or {}).get("address", "")
+            key = f"{f['type']}::{addr}::{txid}::{f.get('description', '')}"
+            if key not in seen_finding_keys:
+                seen_finding_keys.add(key)
+                all_findings.append(f)
+
+        for w in r["warnings"]:
+            txid = w.get("txid") or (w.get("details") or {}).get("txid", "")
+            addr = w.get("address") or (w.get("details") or {}).get("address", "")
+            key = f"{w['type']}::{addr}::{txid}::{w.get('description', '')}"
+            if key not in seen_finding_keys:
+                seen_finding_keys.add(key)
+                all_warnings.append(w)
+
+    return {
+        "stats": {
+            "transactions_analyzed": total_txs,
+            "addresses_derived": total_derived,
+            "utxos_found": total_utxos,
+            "active_addresses": total_active,
+        },
+        "findings": all_findings,
+        "warnings": all_warnings,
+        "summary": {
+            "findings": len(all_findings),
+            "warnings": len(all_warnings),
+            "clean": len(all_findings) == 0 and len(all_warnings) == 0,
+        },
+        "aggregate_scan_window": {
+            "from_index": from_index or 0,
+            "to_index": to_index or 0,
+        },
+    }
+
+
+def run_auto_scan(descriptor: str, branch_mode: str = "receive") -> dict:
+    """
+    Auto gap-limit scan: keep scanning batches of AUTO_BATCH_SIZE until
+    GAP_LIMIT consecutive inactive addresses are found (BIP44 standard).
+    branch_mode: 'receive' (branch 0), 'change' (branch 1), 'both'
+    """
     global _request_count
-    _request_count = 0  # reset counter for each scan job
+    _request_count = 0
+
+    parsed = parse_descriptor(descriptor)
+
+    branches_to_scan = []
+    if branch_mode == "change":
+        branches_to_scan = [1]
+    elif branch_mode == "both":
+        branches_to_scan = [0, 1]
+    else:  # receive (default)
+        branches_to_scan = [0]
+
+    all_branch_reports = []
+    total_addresses_scanned = 0
+
+    for branch in branches_to_scan:
+        offset = 0
+        consecutive_inactive = 0
+        branch_reports = []
+
+        while offset < MAX_AUTO_ADDRESSES:
+            debug(f"Auto-scan branch={branch} offset={offset} gap={consecutive_inactive}/{GAP_LIMIT}")
+            report = scan_branch(parsed, offset, AUTO_BATCH_SIZE, branch)
+            branch_reports.append(report)
+            total_addresses_scanned += report["stats"]["addresses_derived"]
+
+            active_in_batch = report["stats"]["active_addresses"]
+            if active_in_batch == 0:
+                consecutive_inactive += AUTO_BATCH_SIZE
+            else:
+                consecutive_inactive = 0
+
+            if consecutive_inactive >= GAP_LIMIT:
+                debug(f"Gap limit reached at branch={branch} offset={offset + AUTO_BATCH_SIZE}")
+                break
+
+            offset += AUTO_BATCH_SIZE
+
+        # merge all batches for this branch
+        if branch_reports:
+            merged = _merge_branch_reports(branch_reports)
+            merged["_branch"] = branch
+            all_branch_reports.append(merged)
+
+    if not all_branch_reports:
+        return {
+            "stats": {"transactions_analyzed": 0, "addresses_derived": 0, "utxos_found": 0, "active_addresses": 0},
+            "findings": [],
+            "warnings": [{"type": "NO_ACTIVITY_IN_SCANNED_WINDOW", "severity": "LOW",
+                          "description": "No activity found on any scanned branch.",
+                          "details": {"branches": branches_to_scan}}],
+            "summary": {"findings": 0, "warnings": 1, "clean": False},
+            "scan_meta": {"mode": "auto", "branch_mode": branch_mode, "total_addresses_scanned": total_addresses_scanned},
+        }
+
+    final = _merge_branch_reports(all_branch_reports)
+    final["scan_meta"] = {
+        "mode": "auto",
+        "branch_mode": branch_mode,
+        "branches_checked": branches_to_scan,
+        "gap_limit": GAP_LIMIT,
+        "total_addresses_scanned": total_addresses_scanned,
+        "api_base": API_BASE,
+        "request_delay_ms": int(REQUEST_DELAY * 1000),
+    }
+    # for frontend compatibility
+    final["scan_window"] = {
+        "from_index": final["aggregate_scan_window"]["from_index"],
+        "to_index": final["aggregate_scan_window"]["to_index"],
+        "branch": branches_to_scan[0] if len(branches_to_scan) == 1 else -1,
+        "offset": 0,
+        "count": total_addresses_scanned,
+    }
+    return final
+
+
+def run_scan(descriptor: str, offset: int = 0, count: int = 60, branch_mode: str = "receive") -> dict:
+    global _request_count
+    _request_count = 0
 
     if offset < 0:
         raise ValueError("offset must be >= 0")
@@ -446,56 +587,78 @@ def run_scan(descriptor: str, offset: int = 0, count: int = 20) -> dict:
         raise ValueError("count must be between 1 and 500")
 
     parsed = parse_descriptor(descriptor)
-    primary_branch = parsed["branch"]
-    primary_report = scan_branch(parsed, offset, count, primary_branch)
-    branches_checked = [primary_branch]
 
-    should_fallback = (
-        primary_branch == 0
-        and primary_report["stats"]["active_addresses"] == 0
-        and primary_report["stats"]["transactions_analyzed"] == 0
-        and primary_report["stats"]["utxos_found"] == 0
-    )
+    # determine which branches to scan
+    if branch_mode == "change":
+        branches = [1]
+    elif branch_mode == "both":
+        branches = [0, 1]
+    else:
+        branches = [parsed["branch"]]  # use descriptor's own branch
 
-    final_report = primary_report
+    reports = []
+    for branch in branches:
+        report = scan_branch(parsed, offset, count, branch)
 
-    if should_fallback:
-        fallback_report = scan_branch(parsed, offset, count, 1)
-        branches_checked.append(1)
-        has_activity = (
-            fallback_report["stats"]["active_addresses"] > 0
-            or fallback_report["stats"]["transactions_analyzed"] > 0
-            or fallback_report["stats"]["utxos_found"] > 0
+        # fallback: if receive branch has no activity, try change
+        if (
+            branch == 0
+            and branch_mode == "receive"
+            and report["stats"]["active_addresses"] == 0
+            and report["stats"]["transactions_analyzed"] == 0
+        ):
+            fallback = scan_branch(parsed, offset, count, 1)
+            has_activity = (
+                fallback["stats"]["active_addresses"] > 0
+                or fallback["stats"]["transactions_analyzed"] > 0
+            )
+            if has_activity:
+                fallback["warnings"].append({
+                    "type": "BRANCH_FALLBACK",
+                    "severity": "LOW",
+                    "description": "No activity on branch 0; auto-switched to branch 1.",
+                    "details": {"requested_branch": 0, "used_branch": 1},
+                })
+                reports.append(fallback)
+                continue
+            else:
+                report["warnings"].append({
+                    "type": "NO_ACTIVITY_IN_SCANNED_WINDOW",
+                    "severity": "LOW",
+                    "description": "No activity found in this scan window.",
+                    "details": {"offset": offset, "count": count},
+                })
+        reports.append(report)
+
+    if len(reports) == 1:
+        final = reports[0]
+        final["summary"]["findings"] = len(final["findings"])
+        final["summary"]["warnings"] = len(final["warnings"])
+        final["summary"]["clean"] = (
+            len(final["findings"]) == 0 and len(final["warnings"]) == 0
         )
-        if has_activity:
-            final_report = fallback_report
-            final_report["warnings"].append({
-                "type": "BRANCH_FALLBACK",
-                "severity": "LOW",
-                "description": "No activity on branch 0; switched to branch 1.",
-                "details": {"requested_branch": 0, "used_branch": 1},
-            })
-        else:
-            primary_report["warnings"].append({
-                "type": "NO_ACTIVITY_IN_SCANNED_WINDOW",
-                "severity": "LOW",
-                "description": "No activity found on branch 0 or branch 1 for this scan window.",
-                "details": {"offset": offset, "count": count, "branches_checked": branches_checked},
-            })
-            final_report = primary_report
+        final["scan_meta"] = {
+            "mode": "manual",
+            "branch_mode": branch_mode,
+            "branches_checked": branches,
+            "api_base": API_BASE,
+            "request_delay_ms": int(REQUEST_DELAY * 1000),
+        }
+        return final
 
-    final_report["summary"]["findings"] = len(final_report["findings"])
-    final_report["summary"]["warnings"] = len(final_report["warnings"])
-    final_report["summary"]["clean"] = (
-        len(final_report["findings"]) == 0 and len(final_report["warnings"]) == 0
-    )
-    final_report["scan_meta"] = {
-        "branches_checked": branches_checked,
-        "fallback_used": final_report["scan_window"]["branch"] != primary_branch,
-        "requested_branch": primary_branch,
-        "returned_branch": final_report["scan_window"]["branch"],
+    merged = _merge_branch_reports(reports)
+    merged["scan_window"] = {
+        "from_index": merged["aggregate_scan_window"]["from_index"],
+        "to_index": merged["aggregate_scan_window"]["to_index"],
+        "branch": -1,
+        "offset": offset,
+        "count": count,
+    }
+    merged["scan_meta"] = {
+        "mode": "manual",
+        "branch_mode": branch_mode,
+        "branches_checked": branches,
         "api_base": API_BASE,
         "request_delay_ms": int(REQUEST_DELAY * 1000),
     }
-
-    return final_report
+    return merged

@@ -1,124 +1,145 @@
 .root {
-  flex: 1;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   min-height: 100vh;
-  padding: 48px 24px;
-  gap: 48px;
+  gap: 40px;
+  padding: 40px 24px;
 }
 
-/* Scanner ring */
+/* Scanner rings */
 .scanner {
   position: relative;
-  width: 160px;
-  height: 160px;
+  width: 120px;
+  height: 120px;
   display: flex;
   align-items: center;
   justify-content: center;
 }
 
-.ring {
+.ring,
+.ring2,
+.ring3 {
   position: absolute;
-  inset: 0;
   border-radius: 50%;
-  border: 2px solid transparent;
-  border-top-color: var(--accent);
-  border-right-color: rgba(0, 212, 170, 0.3);
-  animation: spin 1.2s linear infinite;
+  border: 1.5px solid transparent;
+}
+
+.ring {
+  inset: 0;
+  border-color: var(--accent);
+  opacity: 0.25;
+  animation: spin 3s linear infinite;
 }
 
 .ring2 {
-  position: absolute;
   inset: 12px;
-  border-radius: 50%;
-  border: 1px solid transparent;
-  border-bottom-color: rgba(0, 212, 170, 0.4);
-  border-left-color: rgba(0, 212, 170, 0.15);
+  border-color: var(--accent);
+  opacity: 0.5;
   animation: spin 2s linear infinite reverse;
 }
 
 .ring3 {
-  position: absolute;
   inset: 24px;
-  border-radius: 50%;
-  border: 1px solid rgba(0, 212, 170, 0.1);
-  animation: pulse 2s ease-in-out infinite;
+  border-color: var(--accent);
+  opacity: 0.8;
+  animation: spin 1.5s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
 }
 
 .logoMark {
-  font-size: 22px;
-  font-weight: 700;
-  letter-spacing: -0.02em;
-  color: var(--text);
-  animation: pulse 2s ease-in-out infinite;
+  font-size: 18px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+  z-index: 1;
 }
 
 .logoMark span {
   color: var(--accent);
 }
 
-/* Status messages */
+/* Status */
 .status {
   text-align: center;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
+}
+
+.autoModeBadge {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--accent);
+  background: var(--accent-dim);
+  border: 1px solid rgba(0, 230, 180, 0.25);
+  border-radius: 20px;
+  padding: 3px 12px;
+  margin-bottom: 4px;
 }
 
 .statusText {
-  font-size: 18px;
-  color: var(--text);
+  font-size: 15px;
   font-weight: 500;
-  letter-spacing: 0.01em;
-  animation: fadeInUp 0.4s ease forwards;
+  color: var(--text-muted);
+  animation: fadeIn 0.3s ease;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
 }
 
 .dots {
-  display: inline-block;
-  animation: blink 1.2s step-end infinite;
-  color: var(--accent);
+  opacity: 0.5;
+  animation: blink 1.2s steps(3, end) infinite;
+}
+
+@keyframes blink {
+  0%, 100% { opacity: 0.2; }
+  50%       { opacity: 0.8; }
 }
 
 .descriptor {
   font-family: var(--font-data);
-  font-size: 12px;
-  color: var(--text-muted);
-  max-width: 400px;
+  font-size: 11px;
+  color: var(--text-dim);
+  max-width: 380px;
+  white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
-/* Elapsed timer */
 .timer {
   font-size: 13px;
   color: var(--text-muted);
   display: flex;
   align-items: center;
-  gap: 5px;
-  font-variant-numeric: tabular-nums;
+  gap: 6px;
 }
 
 .timerIcon {
-  font-size: 12px;
-  opacity: 0.7;
+  font-size: 13px;
 }
 
 .timerNote {
-  font-size: 11px;
-  color: var(--warning);
-  opacity: 0.85;
+  font-size: 12px;
+  color: var(--text-dim);
+  font-style: italic;
 }
 
 /* Progress bar */
 .progressBar {
-  width: 320px;
-  max-width: 100%;
+  width: 220px;
   height: 2px;
-  background: var(--surface);
+  background: var(--border);
   border-radius: 1px;
   overflow: hidden;
 }
@@ -127,37 +148,12 @@
   height: 100%;
   background: var(--accent);
   border-radius: 1px;
-  box-shadow: 0 0 8px var(--accent-glow);
-  animation: progress 4s linear forwards;
-}
-
-/* Keyframes */
-@keyframes spin {
-  to { transform: rotate(360deg); }
-}
-
-@keyframes pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.5; }
-}
-
-@keyframes blink {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0; }
-}
-
-@keyframes fadeInUp {
-  from {
-    opacity: 0;
-    transform: translateY(6px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
+  animation: progress 2.5s ease-in-out infinite;
+  transform-origin: left;
 }
 
 @keyframes progress {
-  from { width: 0%; }
-  to { width: 95%; }
+  0%   { transform: scaleX(0);    margin-left: 0; }
+  50%  { transform: scaleX(0.7);  margin-left: 0; }
+  100% { transform: scaleX(0);    margin-left: 100%; }
 }

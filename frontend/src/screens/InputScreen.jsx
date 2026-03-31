@@ -3,8 +3,11 @@ import styles from './InputScreen.module.css'
 
 const PLACEHOLDER = `wpkh([a1b2c3d4/84h/0h/0h]xpub6CatWdiZynkCminahu8Gmr7FAVnQXBTSMaBxn6qmBNkdm9tDkFzWmjmDrLBCQSTa7BHgpEjCXzMTCyDsQLSmcGYJHBB7cTwpqLNRKGP47uw/0/*)#qwer1234`
 
-export default function InputScreen({ onAnalyze, error, success }) {
+export default function InputScreen({ onAnalyze, error }) {
   const [descriptor, setDescriptor] = useState('')
+  const [branch, setBranch] = useState('receive')
+  const [autoGap, setAutoGap] = useState(false)
+
   const isHttps = typeof window !== 'undefined' && window.location.protocol === 'https:'
   const isLocalhost = typeof window !== 'undefined' &&
     (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')
@@ -14,7 +17,7 @@ export default function InputScreen({ onAnalyze, error, success }) {
     e.preventDefault()
     const trimmed = descriptor.trim()
     if (!trimmed) return
-    onAnalyze(trimmed)
+    onAnalyze(trimmed, { branch, auto: autoGap })
   }
 
   return (
@@ -52,19 +55,56 @@ export default function InputScreen({ onAnalyze, error, success }) {
             autoCapitalize="off"
           />
 
+          {/* Branch selector */}
+          <div className={styles.optionsRow}>
+            <div className={styles.optionGroup}>
+              <span className={styles.optionLabel}>Branch</span>
+              <div className={styles.segmented}>
+                {['receive', 'change', 'both'].map((b) => (
+                  <button
+                    key={b}
+                    type="button"
+                    className={`${styles.segment} ${branch === b ? styles.segmentActive : ''}`}
+                    onClick={() => setBranch(b)}
+                  >
+                    {b === 'receive' ? 'Receive /0' : b === 'change' ? 'Change /1' : 'Both'}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className={styles.optionGroup}>
+              <span className={styles.optionLabel}>Scan mode</span>
+              <button
+                type="button"
+                className={`${styles.toggleBtn} ${autoGap ? styles.toggleActive : ''}`}
+                onClick={() => setAutoGap((v) => !v)}
+                title="Auto gap-limit: scan until 20 consecutive inactive addresses (BIP44 standard)"
+              >
+                <span className={styles.toggleDot} />
+                Auto gap-limit
+              </button>
+            </div>
+          </div>
+
+          {autoGap && (
+            <div className={styles.autoNote}>
+              ⚡ Will scan automatically until 20 consecutive inactive addresses are found (BIP44 standard). May take longer for large wallets.
+            </div>
+          )}
+
           {error && <div className={styles.errorBox}>{error}</div>}
-          {success && <div className={styles.successBox}>{success}</div>}
 
           <button
             type="submit"
             className={styles.button}
             disabled={!descriptor.trim()}
           >
-            Analyze Wallet
+            {autoGap ? 'Auto Scan Wallet' : 'Analyze Wallet'}
           </button>
 
           <p className={styles.hint}>
-            Supports <code>wpkh()</code>, <code>pkh()</code>, <code>sh(wpkh())</code> descriptors
+            Supports <code>wpkh()</code> descriptors with xpub / zpub / ypub
           </p>
         </form>
 
