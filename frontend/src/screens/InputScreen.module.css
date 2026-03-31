@@ -65,6 +65,62 @@
   letter-spacing: 0.02em;
 }
 
+/* Hosted warning */
+.hostedWarning {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+  padding: 13px 16px;
+  background: rgba(244, 162, 97, 0.07);
+  border: 1px solid rgba(244, 162, 97, 0.30);
+  border-left: 3px solid rgba(244, 162, 97, 0.70);
+  border-radius: var(--radius);
+  color: var(--warning);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.hostedWarningLeft {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  flex: 1;
+}
+
+.hostedWarning strong {
+  color: rgba(244, 162, 97, 0.95);
+}
+
+.hostedLink {
+  color: rgba(244, 162, 97, 0.85);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.hostedLink:hover {
+  color: rgba(244, 162, 97, 1);
+}
+
+.hostedDismiss {
+  flex-shrink: 0;
+  background: transparent;
+  border: none;
+  color: rgba(244, 162, 97, 0.5);
+  cursor: pointer;
+  font-size: 13px;
+  padding: 2px 4px;
+  line-height: 1;
+  border-radius: 4px;
+  transition: color var(--transition);
+  margin-top: 1px;
+}
+
+.hostedDismiss:hover {
+  color: rgba(244, 162, 97, 0.9);
+}
+
 /* HTTPS Warning */
 .httpsWarning {
   display: flex;

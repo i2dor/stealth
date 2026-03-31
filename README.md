@@ -4,159 +4,180 @@ A privacy audit tool for Bitcoin wallets. Stealth analyzes the transaction histo
 
 ## What it does
 
-Paste a Bitcoin wallet descriptor into the input screen and click **Analyze**. Stealth derives addresses from the descriptor, scans wallet-related chain history, and returns a report with structured `findings` and `warnings`.
+Paste a Bitcoin wallet descriptor into the input screen and click **Analyze**. Stealth derives addresses from the descriptor, scans wallet-related chain history via the Blockstream/Mempool public APIs, and returns a structured report with `findings` and `warnings`.
 
-## Detection taxonomy (ground truth)
+## Quick start (hosted)
 
-Stealth's source-of-truth detector is [`backend/script/detect.py`](backend/script/detect.py). The frontend renders the `type` values emitted by that script.
+The easiest way to use Stealth is the hosted version at **[stealth.vercel.app](https://vercel.com/arthurs-projects-bf400950/stealth)**.
 
-### Finding types
+> ⚠️ **Privacy note:** On the hosted version your descriptor is sent to the Vercel API server for analysis. It is never stored or logged, but it does leave your device. For maximum privacy, [run locally](#running-locally).
 
-| Type | Meaning |
-|---|---|
-| `ADDRESS_REUSE` | Address received funds in multiple transactions, linking history and balances. |
-| `CIOH` | Multi-input linkage (Common Input Ownership Heuristic) across co-spent inputs. |
-| `DUST` | Dust output detection (current or historical). |
-| `DUST_SPENDING` | Dust input spent with normal inputs, actively linking clusters. |
-| `CHANGE_DETECTION` | Change output appears trivially identifiable through heuristics. |
-| `CONSOLIDATION` | UTXO created from many-input consolidation transaction. |
-| `SCRIPT_TYPE_MIXING` | Mixed input script families in one spend (strong fingerprint). |
-| `CLUSTER_MERGE` | Inputs from previously separate funding chains merged in one tx. |
-| `UTXO_AGE_SPREAD` | Large age spread across UTXOs reveals dormancy/lookback patterns. |
-| `EXCHANGE_ORIGIN` | Probable exchange batch-withdrawal origin. |
-| `TAINTED_UTXO_MERGE` | Tainted and clean inputs merged, propagating taint. |
-| `BEHAVIORAL_FINGERPRINT` | Consistent transaction behavior reveals wallet/user fingerprint. |
+## Running locally
 
-### Warning-only types
-
-| Type | Meaning |
-|---|---|
-| `DORMANT_UTXOS` | Dormant/aged UTXO pattern warning. |
-| `DIRECT_TAINT` | Direct receipt from a known risky source. |
-
-`severity` values are emitted as uppercase strings (for example `LOW`, `MEDIUM`, `HIGH`, and `CRITICAL`).
-
-## How to use
-
-1. Open the application.
-2. On the first screen, paste your wallet descriptor into the input field.
-   - Supported formats: `wpkh(...)`, `pkh(...)`, `sh(wpkh(...))`, `tr(...)`, and multisig variants.
-3. Click **Analyze**.
-4. Review the results:
-   - Summary counters for findings, warnings, and transactions analyzed.
-   - Collapsible finding/warning cards with type, severity, description, and structured evidence.
-
-## Installation
+Running the backend on your own machine means your descriptor and derived addresses **never leave your device** (only the individual Bitcoin addresses are queried against Blockstream/Mempool).
 
 ### Prerequisites
 
 | Dependency | Version | Purpose |
 |---|---|---|
-| [Bitcoin Core](https://bitcoincore.org/en/download/) | ≥ 26 | Local regtest node |
-| Python | ≥ 3.10 | Analysis engine (`detect.py`) |
-| Java | 21 | Quarkus backend |
-| Node.js + yarn | ≥ 18 | React frontend |
+| Python | ≥ 3.10 | Analysis backend (`api/`) |
+| Node.js | ≥ 18 | React frontend |
+| pip | – | Python dependencies |
 
-### 1. Clone the repository
+### 1. Clone
 
 ```bash
-git clone https://github.com/LORDBABUINO/stealth.git
+git clone https://github.com/i2dor/stealth.git
 cd stealth
 ```
 
-### 2. Configure the blockchain connection
-
-Edit `backend/script/config.ini` to match your node:
-
-```ini
-[bitcoin]
-network = regtest
-cli = bitcoin-cli
-
-# Data directory — matches setup.sh (relative to config.ini location)
-datadir = bitcoin-data
-
-# Optional RPC overrides (leave blank to use cookie auth from the datadir)
-rpchost =
-rpcport =
-rpcuser =
-rpcpassword =
-```
-
-### 3. Bootstrap Bitcoin Core (regtest)
+### 2. Install backend dependencies
 
 ```bash
-cd backend/script
-./setup.sh          # starts bitcoind, creates wallets, mines 110 blocks
+pip install -r requirements.txt
+# SOCKS5/Tor support (optional but recommended):
+pip install requests[socks]
 ```
 
-Pass `--fresh` to wipe the chain and start from genesis.
-
-### 4. Generate vulnerable transactions (required before using the app)
+### 3. Start the backend
 
 ```bash
-python3 reproduce.py
+uvicorn api.scan:app --host 127.0.0.1 --port 8000
 ```
 
-This script sends transactions between the test wallets to reproduce all 12 detector finding types. **The application will return no findings without this step**, since a freshly mined chain has no transaction history to analyze.
+The API will be available at `http://localhost:8000`.
 
-After it runs, get a descriptor to paste into the app:
-
-```bash
-bitcoin-cli -datadir=bitcoin-data -regtest -rpcwallet=alice listdescriptors | python3 -c \
-  "import sys,json; d=json.load(sys.stdin)['descriptors']; print(d[0]['desc'])"
-```
-
-Copy the output and use it as the descriptor in the application.
-
-### 5. Start the backend
-
-```bash
-cd backend/src/StealthBackend
-./mvnw quarkus:dev
-```
-
-The API will be available at `http://localhost:8080`.
-
-### 6. Start the frontend
+### 4. Start the frontend
 
 ```bash
 cd frontend
-yarn install
-yarn dev
+npm install
+npm run dev
 ```
 
 Open `http://localhost:5173` in your browser.
 
-## Running
+### 5. Point the frontend at your local backend
 
-1. Paste a wallet descriptor into the input field (e.g. `wpkh([fp/84h/0h/0h]xpub.../0/*)`).
-2. Click **Analyze** — the frontend calls `GET /api/wallet/scan?descriptor=…` on the backend, which runs `detect.py` against your local regtest node.
-3. Review the report:
-   - `findings[]` and `warnings[]` entries each include `type`, `severity`, `description`, and optional `details`.
-   - The summary panel shows `findings`, `warnings`, and whether the scan is `clean`.
+In the app go to **Settings → API & Backend** and set:
+
+```
+Backend API base URL: http://localhost:8000
+```
+
+Leave empty to use the hosted Vercel API.
+
+---
+
+## Tor / Proxy
+
+Routing blockchain API requests through Tor hides your IP address from Blockstream and Mempool. This is the recommended privacy setup for most users: your descriptor stays local, and the address lookups are anonymized.
+
+### Requirements
+
+- Tor daemon running locally (via **Tor Browser** or the `tor` system package)
+- Backend running locally (Tor proxy is **not** available on the hosted Vercel version, since serverless functions cannot reach a local SOCKS5 socket)
+- `PySocks` installed: `pip install requests[socks]`
+
+### Setup
+
+1. Start Tor:
+   - **Tor Browser:** launch it and keep it open (listens on `127.0.0.1:9150` by default)
+   - **System Tor daemon:** `sudo systemctl start tor` (listens on `127.0.0.1:9050`)
+
+2. Start Stealth backend locally (see [Running locally](#running-locally)).
+
+3. In the Stealth UI go to **Settings → Tor / Proxy** and enter:
+
+   | Setup | Proxy URL |
+   |---|---|
+   | Tor Browser | `socks5h://127.0.0.1:9150` |
+   | System Tor daemon | `socks5h://127.0.0.1:9050` |
+   | Custom SOCKS5 | `socks5h://<host>:<port>` |
+
+   > Use `socks5h://` (not `socks5://`) so that DNS resolution also goes through Tor, preventing hostname leaks.
+
+4. Click **Save settings** and run a scan normally.
+
+### Verify Tor is working
+
+After a scan, open the browser console and check the `scan_meta.proxy` field in the API response — it should show your proxy URL:
+
+```json
+"scan_meta": {
+  "proxy": "socks5h://127.0.0.1:9050",
+  ...
+}
+```
+
+If `proxy` is `null`, the proxy was not applied (check that the backend URL in Settings points to your local instance, not Vercel).
+
+---
+
+## Privacy levels
+
+| Setup | Descriptor exposed? | IP exposed to Blockstream/Mempool? | Effort |
+|---|---|---|---|
+| Hosted (vercel.app) | To Vercel API | Yes | None |
+| Local backend, no proxy | No | Yes | Low |
+| **Local backend + Tor** | **No** | **No** | **Low** |
+| Local backend + own Esplora node | No | No | High |
+
+The recommended setup for most users is **Local backend + Tor**.
+
+---
+
+## Detection taxonomy
+
+| Type | Severity | Meaning |
+|---|---|---|
+| `CIOH` | HIGH | Common Input Ownership Heuristic — multiple of your UTXOs co-spent in one tx, linking them. |
+| `ADDRESS_REUSE` | HIGH | An address of yours received funds in multiple transactions, linking history. |
+| `DUST` | MEDIUM/HIGH | Dust UTXO present — if spent with normal inputs, it links your UTXOs together. |
+| `PAYJOIN_INTERACTION` | LOW | Transaction has mixed inputs (yours + external) consistent with PayJoin/P2EP. |
+| `WHIRLPOOL_COINJOIN` | LOW | Transaction matches Whirlpool CoinJoin pattern. Good for privacy; ensure post-mix spend is careful. |
+| `FEE_FINGERPRINTING` | LOW | Round fee rate (e.g. 1, 5, 10 sat/vB) fingerprints your wallet software. |
+| `BATCH_PAYMENT_FINGERPRINT` | LOW | 5+ external outputs in one tx — typical of exchange/custodial batching. |
+| `TINY_CHANGE_OUTPUT` | MEDIUM | Change output is disproportionately small relative to payment, trivially identifiable. |
+
+`severity` values: `LOW`, `MEDIUM`, `HIGH`.
+
+---
+
+## Settings reference
+
+| Setting | Default | Description |
+|---|---|---|
+| Backend API base URL | *(empty — uses Vercel)* | Override to point at your local backend |
+| Blockstream API URL | `https://blockstream.info/api` | Primary API for address/tx lookups |
+| Mempool API URL | `https://mempool.space/api` | Fallback API |
+| Electrum host | *(empty)* | Your own Electrum server host |
+| Electrum port | `50002` | SSL port (50001 for plain TCP) |
+| SOCKS5 proxy URL | *(empty)* | `socks5h://127.0.0.1:9050` for Tor |
+| Request delay (ms) | `300` | Delay between API requests to avoid rate-limiting |
+| Batch size | `60` | Addresses derived per scan batch |
+| Gap limit | `20` | Consecutive empty addresses before stopping (BIP44 standard) |
+
+---
 
 ## Project structure
 
 ```
 stealth/
-├── frontend/              # React + Vite UI
+├── api/
+│   ├── scan.py           # Vercel serverless handler (GET /api/scan)
+│   └── detect_public.py  # Core analysis engine + detectors
+├── frontend/
 │   └── src/
-│       ├── components/    # FindingCard, VulnerabilityBadge
-│       ├── screens/       # InputScreen, LoadingScreen, ReportScreen
-│       └── services/      # walletService.js (API client)
-├── backend/
-│   ├── script/            # Python scripts + regtest data
-│   │   ├── setup.sh       # Bootstrap bitcoind regtest
-│   │   ├── reproduce.py   # Create 12 vulnerability scenarios
-│   │   ├── detect.py      # Privacy vulnerability detector
-│   │   ├── bitcoin_rpc.py # bitcoin-cli wrapper
-│   │   ├── config.ini     # Connection config (datadir, network)
-│   │   └── bitcoin-data/  # Regtest chain data (gitignored)
-│   └── src/StealthBackend/ # Quarkus Java REST API (single /api/wallet/scan endpoint)
-└── slides/                # Slidev pitch presentation
+│       ├── screens/      # InputScreen, LoadingScreen, ReportScreen, SettingsScreen
+│       └── services/     # walletService.js (API client)
+└── requirements.txt
 ```
+
+---
 
 ## Privacy notice
 
-Stealth does **not** store, log, or transmit your wallet descriptor or any derived keys. All analysis is read-only and uses publicly available on-chain data. However, querying a third-party node or API for your transaction history may itself reveal your addresses to that service. For maximum privacy, point the backend at your own Bitcoin node.
+Stealth does **not** store, log, or transmit your wallet descriptor beyond the ephemeral API call used to run the analysis. All analysis is read-only. The descriptor is not written to disk, databases, or logs on the Vercel infrastructure.
+
+However, querying any third-party API (Blockstream, Mempool) for your Bitcoin addresses does reveal those addresses to that service, along with your IP address — unless you use the [Tor setup](#tor--proxy) above.

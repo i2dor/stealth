@@ -7,11 +7,16 @@ export default function InputScreen({ onAnalyze, onSettings, error }) {
   const [descriptor, setDescriptor] = useState('')
   const [branch, setBranch] = useState('receive')
   const [autoGap, setAutoGap] = useState(false)
+  const [hostedDismissed, setHostedDismissed] = useState(false)
 
   const isHttps = typeof window !== 'undefined' && window.location.protocol === 'https:'
   const isLocalhost = typeof window !== 'undefined' &&
     (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')
+  const isHosted = typeof window !== 'undefined' &&
+    window.location.hostname.includes('vercel.app')
+
   const showHttpsWarning = !isHttps && !isLocalhost
+  const showHostedWarning = isHosted && !hostedDismissed
 
   function handleSubmit(e) {
     e.preventDefault()
@@ -44,9 +49,29 @@ export default function InputScreen({ onAnalyze, onSettings, error }) {
           <div className={styles.tagline}>Bitcoin Wallet Privacy Analyzer</div>
         </div>
 
+        {showHostedWarning && (
+          <div className={styles.hostedWarning}>
+            <div className={styles.hostedWarningLeft}>
+              <span className={styles.warnIcon}>⚠</span>
+              <div>
+                <strong>You're using the hosted version.</strong> Your descriptor is sent to the Vercel API server — it is not stored, but it does leave your device.
+                {' '}For maximum privacy, <a href="https://github.com/i2dor/stealth#running-locally" target="_blank" rel="noopener noreferrer" className={styles.hostedLink}>run Stealth locally</a> and optionally route traffic through <a href="https://github.com/i2dor/stealth#tor--proxy" target="_blank" rel="noopener noreferrer" className={styles.hostedLink}>Tor</a>.
+              </div>
+            </div>
+            <button
+              className={styles.hostedDismiss}
+              onClick={() => setHostedDismissed(true)}
+              aria-label="Dismiss warning"
+              title="Dismiss"
+            >
+              ✕
+            </button>
+          </div>
+        )}
+
         {showHttpsWarning && (
           <div className={styles.httpsWarning}>
-            <span className={styles.warnIcon}>\u26a0</span>
+            <span className={styles.warnIcon}>⚠</span>
             <span>
               <strong>Insecure connection detected.</strong> Use HTTPS to protect your descriptor from interception.
             </span>
@@ -102,7 +127,7 @@ export default function InputScreen({ onAnalyze, onSettings, error }) {
 
           {autoGap && (
             <div className={styles.autoNote}>
-              \u26a1 Will scan automatically until 20 consecutive inactive addresses are found (BIP44 standard). May take longer for large wallets.
+              ⚡ Will scan automatically until 20 consecutive inactive addresses are found (BIP44 standard). May take longer for large wallets.
             </div>
           )}
 
@@ -122,7 +147,7 @@ export default function InputScreen({ onAnalyze, onSettings, error }) {
         </form>
 
         <div className={styles.privacyNotice}>
-          <span className={styles.shieldIcon}>\ud83d\udd12</span>
+          <span className={styles.shieldIcon}>🔒</span>
           <span>
             Your descriptor is sent only to the analysis API and is <strong>never stored or logged</strong>.
             All processing happens server-side in an ephemeral context.
