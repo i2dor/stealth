@@ -29,7 +29,7 @@ function exportPDF(aggregateReport, descriptor) {
 
   const lines = []
   lines.push('STEALTH — Bitcoin Wallet Privacy Report')
-  lines.push('=' .repeat(60))
+  lines.push('='.repeat(60))
   lines.push(`Generated: ${new Date().toLocaleString()}`)
   lines.push(`Descriptor: ${descriptor ? descriptor.slice(0, 60) + '...' : 'n/a'}`)
   lines.push(`Addresses scanned: ${window_.from_index ?? 0} – ${window_.to_index ?? 0}`)
@@ -96,9 +96,13 @@ export default function ReportScreen({
       <div className={styles.container}>
         <div className={styles.header}>
           <div className={styles.nav}>
-            <div className={styles.wordmark}>
+            <button
+              className={styles.wordmark}
+              onClick={onReset}
+              title="Back to home"
+            >
               STEAL<span>TH</span>
-            </div>
+            </button>
             <div className={styles.navActions}>
               <button
                 className={styles.exportButton}
@@ -115,7 +119,7 @@ export default function ReportScreen({
                 ↓ TXT
               </button>
               <button className={styles.backButton} onClick={onReset}>
-                ← Analyze Another
+                ← New Analysis
               </button>
             </div>
           </div>
@@ -136,11 +140,7 @@ export default function ReportScreen({
         )}
 
         <div className={styles.scanMeta}>
-          Current batch: addresses {fromIndex}–{toIndex}
-        </div>
-
-        <div className={styles.scanMeta}>
-          All addresses scanned: {totalFrom}–{totalTo}
+          Batch: addresses {fromIndex}–{toIndex} &nbsp;·&nbsp; Total scanned: {totalFrom}–{totalTo}
         </div>
 
         <div className={styles.paginationRow}>
@@ -181,7 +181,7 @@ export default function ReportScreen({
 
         {summary.clean && (
           <div className={styles.cleanBanner}>
-            No privacy issues found — this wallet has a clean history.
+            No privacy issues found in this scan window.
           </div>
         )}
 
