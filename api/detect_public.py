@@ -22,6 +22,16 @@ GAP_LIMIT = int(os.environ.get("GAP_LIMIT", "20"))
 AUTO_BATCH_SIZE = int(os.environ.get("AUTO_BATCH_SIZE", "20"))
 MAX_AUTO_ADDRESSES = int(os.environ.get("MAX_AUTO_ADDRESSES", "500"))
 
+# Whirlpool known pool denominations in satoshis
+WHIRLPOOL_POOL_AMOUNTS = {100_000, 1_000_000, 5_000_000, 50_000_000}
+# Dust threshold
+DUST_LIMIT_SATS = 1000
+# Max fee rate considered "normal" (sat/vB); above suggests privacy-seeking
+HIGH_FEE_THRESHOLD = 50
+# Round-number payment detection threshold (sats)
+ROUND_AMOUNT_SATS = [100_000, 500_000, 1_000_000, 5_000_000, 10_000_000,
+                     50_000_000, 100_000_000]
+
 SLIP132_TO_BIP32 = {
     "xpub": ("0488b21e", "0488b21e"),
     "ypub": ("049d7cb2", "0488b21e"),
@@ -319,6 +329,10 @@ class TxGraph:
         return addrs
 
 
+# ─────────────────────────────────────────────────────────
+# DETECTORS
+# ─────────────────────────────────────────────────────────
+
 def detect_address_reuse(g):
     findings = []
     for addr in g.our_addrs:
@@ -345,7 +359,7 @@ def detect_dust(g):
     findings = []
     for u in g.utxos:
         sats = satoshis(u["amount"])
-        if sats <= 1000 and g.is_ours(u.get("address", "")):
+        if sats <= DUST_LIMIT_SATS and g.is_ours(u.get("address", "")):
             findings.append({
                 "type": "DUST",
                 "severity": "MEDIUM" if sats > 546 else "HIGH",
@@ -356,7 +370,7 @@ def detect_dust(g):
                     "txid": u["txid"],
                     "vout": u["vout"],
                 },
-                "correction": "Avoid spending dust with normal inputs.",
+                "correction": "Avoid spending dust with normal inputs — it links UTXOs together.",
             })
     return findings
 
@@ -380,6 +394,240 @@ def detect_cioh(g):
                 },
                 "correction": "Use coin control to avoid merging multiple UTXOs.",
             })
+    return findings
+
+
+def detect_payjoin_interaction(g):
+    """
+    PayJoin (P2EP) detection heuristic:
+    A transaction where:
+    - at least one of OUR addresses is in the inputs AND
+    - at least one external address is also in the inputs AND
+    - at least one of our addresses receives an output
+    This pattern is consistent with PayJoin — the recipient adds their own input.
+    We flag it as INFORMATIONAL: the user may have used PayJoin (good), or may
+    have unknowingly participated in a transaction with external inputs (risky).
+    """
+    findings = []
+    for txid in g.our_txids:
+        tx = g.fetch_tx(txid)
+        if not tx:
+            continue
+        inputs = g.get_input_addresses(txid)
+        if len(inputs) < 2:
+            continue
+
+        our_input_addrs = [i["address"] for i in inputs if g.is_ours(i["address"])]
+        ext_input_addrs = [i["address"] for i in inputs if not g.is_ours(i["address"]) and i["address"]]
+
+        if not our_input_addrs or not ext_input_addrs:
+            continue
+
+        # check if we also receive an output in the same tx
+        our_output_addrs = [
+            vout.get("scriptpubkey_address", "")
+            for vout in tx.get("vout", [])
+            if g.is_ours(vout.get("scriptpubkey_address", ""))
+        ]
+
+        if our_output_addrs:
+            findings.append({
+                "type": "PAYJOIN_INTERACTION",
+                "severity": "LOW",
+                "description": (
+                    f"TX {txid[:16]}… has mixed inputs (yours + external) and outputs to your wallet. "
+                    "Consistent with a PayJoin/P2EP transaction."
+                ),
+                "details": {
+                    "txid": txid,
+                    "our_inputs": len(our_input_addrs),
+                    "external_inputs": len(ext_input_addrs),
+                    "our_outputs": len(our_output_addrs),
+                },
+                "correction": (
+                    "If you intentionally used PayJoin — great, this improves privacy. "
+                    "If not, an external party contributed inputs alongside yours, which could be a privacy risk."
+                ),
+            })
+    return findings
+
+
+def detect_whirlpool_patterns(g):
+    """
+    Whirlpool CoinJoin detection:
+    - Transaction has exactly 5 outputs of equal value matching a known Whirlpool pool amount
+    - All outputs are P2WPKH (bc1q…)
+    - At least one output goes to one of our addresses
+    """
+    findings = []
+    for txid in g.our_txids:
+        tx = g.fetch_tx(txid)
+        if not tx:
+            continue
+
+        vouts = tx.get("vout", [])
+        if len(vouts) < 4:
+            continue
+
+        # Collect output values
+        output_values = [vout.get("value", 0) for vout in vouts]
+
+        # Check for equal-value outputs matching Whirlpool pools
+        for pool_sats in WHIRLPOOL_POOL_AMOUNTS:
+            matching = [v for v in output_values if v == pool_sats]
+            if len(matching) >= 4:  # Whirlpool typically has 5 equal outputs
+                # Check if any go to us
+                our_outputs = [
+                    vout for vout in vouts
+                    if vout.get("value") == pool_sats and g.is_ours(vout.get("scriptpubkey_address", ""))
+                ]
+                if our_outputs:
+                    findings.append({
+                        "type": "WHIRLPOOL_COINJOIN",
+                        "severity": "LOW",
+                        "description": (
+                            f"TX {txid[:16]}… matches Whirlpool CoinJoin pattern "
+                            f"({len(matching)} equal outputs of {pool_sats:,} sats)."
+                        ),
+                        "details": {
+                            "txid": txid,
+                            "pool_amount_sats": pool_sats,
+                            "equal_output_count": len(matching),
+                            "our_mixed_outputs": len(our_outputs),
+                        },
+                        "correction": (
+                            "This looks like a Whirlpool mix — good for privacy! "
+                            "Make sure post-mix UTXOs are spent carefully to preserve the anonymity set."
+                        ),
+                    })
+                    break  # one finding per tx is enough
+    return findings
+
+
+def detect_fee_fingerprinting(g):
+    """
+    Fee fingerprinting detection:
+    Some wallets use distinctive fee-rate patterns (e.g. always round sat/vB like 1, 2, 5, 10)
+    or specific fee calculation methods (e.g. fee is exactly divisible by output count).
+    We detect:
+    1. Round fee-rate pattern: fee rate is a round number (1, 2, 5, 10, 20, 50 sat/vB)
+    2. Batched payment fingerprint: single tx sends to 5+ external outputs
+       (suggests a custodial or corporate batcher)
+    3. Unnecessary change fingerprint: change output is disproportionately small vs. payment
+    """
+    findings = []
+    round_fee_rates = {1, 2, 5, 10, 15, 20, 25, 50, 100}
+    round_fee_txids = []
+    batch_payment_txids = []
+    tiny_change_txids = []
+
+    for txid in g.our_txids:
+        tx = g.fetch_tx(txid)
+        if not tx:
+            continue
+
+        fee = tx.get("fee", 0)
+        weight = tx.get("weight", 0)
+        vsize = max(1, (weight + 3) // 4) if weight else 0
+
+        # 1. Round fee rate detection
+        if vsize > 0 and fee > 0:
+            fee_rate = round(fee / vsize)
+            if fee_rate in round_fee_rates:
+                round_fee_txids.append({
+                    "txid": txid,
+                    "fee_rate_sat_vb": fee_rate,
+                    "fee_sats": fee,
+                })
+
+        # 2. Batch payment detection (many external outputs)
+        vouts = tx.get("vout", [])
+        external_outputs = [
+            vout for vout in vouts
+            if not g.is_ours(vout.get("scriptpubkey_address", ""))
+            and vout.get("scriptpubkey_type") != "op_return"
+        ]
+        if len(external_outputs) >= 5:
+            batch_payment_txids.append({
+                "txid": txid,
+                "external_output_count": len(external_outputs),
+            })
+
+        # 3. Tiny change output detection
+        our_outputs = [
+            vout for vout in vouts
+            if g.is_ours(vout.get("scriptpubkey_address", ""))
+        ]
+        non_our_outputs = [
+            vout for vout in vouts
+            if not g.is_ours(vout.get("scriptpubkey_address", ""))
+            and vout.get("scriptpubkey_type") != "op_return"
+        ]
+        if our_outputs and non_our_outputs:
+            our_max = max(v.get("value", 0) for v in our_outputs)
+            ext_max = max(v.get("value", 0) for v in non_our_outputs)
+            # If our "change" is less than 1% of the payment, it's a fingerprint
+            if ext_max > 0 and our_max / ext_max < 0.01 and our_max < 10_000:
+                tiny_change_txids.append({
+                    "txid": txid,
+                    "change_sats": our_max,
+                    "payment_sats": ext_max,
+                })
+
+    if round_fee_txids:
+        findings.append({
+            "type": "FEE_FINGERPRINTING",
+            "severity": "LOW",
+            "description": (
+                f"{len(round_fee_txids)} transaction(s) use a round fee rate "
+                "(e.g. 1, 5, 10 sat/vB) — a fingerprint of some wallet software."
+            ),
+            "details": {
+                "transactions": round_fee_txids[:10],  # cap at 10
+                "count": len(round_fee_txids),
+            },
+            "correction": (
+                "Use wallets that calculate fee rates dynamically (non-round values) "
+                "to avoid leaking which software you use."
+            ),
+        })
+
+    if batch_payment_txids:
+        findings.append({
+            "type": "BATCH_PAYMENT_FINGERPRINT",
+            "severity": "LOW",
+            "description": (
+                f"{len(batch_payment_txids)} transaction(s) send to 5+ external outputs — "
+                "typical of exchange or custodial batching."
+            ),
+            "details": {
+                "transactions": batch_payment_txids[:10],
+                "count": len(batch_payment_txids),
+            },
+            "correction": (
+                "If you're not an exchange, avoid sending to many recipients at once; "
+                "it reveals your role in the transaction graph."
+            ),
+        })
+
+    if tiny_change_txids:
+        findings.append({
+            "type": "TINY_CHANGE_OUTPUT",
+            "severity": "MEDIUM",
+            "description": (
+                f"{len(tiny_change_txids)} transaction(s) have disproportionately tiny change outputs, "
+                "making the change output trivially identifiable."
+            ),
+            "details": {
+                "transactions": tiny_change_txids[:10],
+                "count": len(tiny_change_txids),
+            },
+            "correction": (
+                "Use wallets with change-output optimization or round-trip payments "
+                "to avoid exposing your change address."
+            ),
+        })
+
     return findings
 
 
@@ -408,6 +656,9 @@ def scan_branch(parsed, offset, count, branch):
     findings.extend(detect_address_reuse(graph))
     findings.extend(detect_dust(graph))
     findings.extend(detect_cioh(graph))
+    findings.extend(detect_payjoin_interaction(graph))
+    findings.extend(detect_whirlpool_patterns(graph))
+    findings.extend(detect_fee_fingerprinting(graph))
 
     return {
         "scan_window": {
@@ -495,11 +746,6 @@ def _merge_branch_reports(reports):
 
 
 def run_auto_scan(descriptor: str, branch_mode: str = "receive") -> dict:
-    """
-    Auto gap-limit scan: keep scanning batches of AUTO_BATCH_SIZE until
-    GAP_LIMIT consecutive inactive addresses are found (BIP44 standard).
-    branch_mode: 'receive' (branch 0), 'change' (branch 1), 'both'
-    """
     global _request_count
     _request_count = 0
 
@@ -510,7 +756,7 @@ def run_auto_scan(descriptor: str, branch_mode: str = "receive") -> dict:
         branches_to_scan = [1]
     elif branch_mode == "both":
         branches_to_scan = [0, 1]
-    else:  # receive (default)
+    else:
         branches_to_scan = [0]
 
     all_branch_reports = []
@@ -539,7 +785,6 @@ def run_auto_scan(descriptor: str, branch_mode: str = "receive") -> dict:
 
             offset += AUTO_BATCH_SIZE
 
-        # merge all batches for this branch
         if branch_reports:
             merged = _merge_branch_reports(branch_reports)
             merged["_branch"] = branch
@@ -566,7 +811,6 @@ def run_auto_scan(descriptor: str, branch_mode: str = "receive") -> dict:
         "api_base": API_BASE,
         "request_delay_ms": int(REQUEST_DELAY * 1000),
     }
-    # for frontend compatibility
     final["scan_window"] = {
         "from_index": final["aggregate_scan_window"]["from_index"],
         "to_index": final["aggregate_scan_window"]["to_index"],
@@ -588,19 +832,17 @@ def run_scan(descriptor: str, offset: int = 0, count: int = 60, branch_mode: str
 
     parsed = parse_descriptor(descriptor)
 
-    # determine which branches to scan
     if branch_mode == "change":
         branches = [1]
     elif branch_mode == "both":
         branches = [0, 1]
     else:
-        branches = [parsed["branch"]]  # use descriptor's own branch
+        branches = [parsed["branch"]]
 
     reports = []
     for branch in branches:
         report = scan_branch(parsed, offset, count, branch)
 
-        # fallback: if receive branch has no activity, try change
         if (
             branch == 0
             and branch_mode == "receive"
