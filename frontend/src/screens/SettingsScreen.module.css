@@ -81,6 +81,8 @@
   font-size: 20px;
   line-height: 1.3;
   flex-shrink: 0;
+  /* force emoji rendering, not text */
+  font-variant-emoji: emoji;
 }
 
 .sectionTitle {
@@ -125,8 +127,32 @@
   display: flex;
   gap: 16px;
   flex-wrap: wrap;
+  align-items: stretch;
 }
 
+/* fieldCol: used inside fieldRow — inputs align to the bottom */
+.fieldCol {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 140px;
+  margin-bottom: 14px;
+}
+
+.fieldCol .label {
+  margin-bottom: 5px;
+}
+
+.fieldCol .fieldDesc {
+  flex: 1;         /* push the input to the bottom */
+  margin-bottom: 8px;
+}
+
+.fieldCol .inputBottom {
+  margin-top: auto;
+}
+
+/* standalone field (outside fieldRow) */
 .field {
   display: flex;
   flex-direction: column;

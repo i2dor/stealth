@@ -39,7 +39,7 @@ export default function SettingsScreen({ settings, onSave, onBack }) {
       <div className={styles.container}>
         <div className={styles.header}>
           <button className={styles.backBtn} onClick={onBack}>
-            \u2190 Back
+            &larr; Back
           </button>
           <div className={styles.titleRow}>
             <span className={styles.wordmark}>STEAL<span>TH</span></span>
@@ -52,9 +52,9 @@ export default function SettingsScreen({ settings, onSave, onBack }) {
           {/* API / Backend */}
           <section className={styles.section}>
             <div className={styles.sectionHeader}>
-              <span className={styles.sectionIcon}>\ud83d\udce1</span>
+              <span className={styles.sectionIcon} aria-hidden="true">📡</span>
               <div>
-                <div className={styles.sectionTitle}>API & Backend</div>
+                <div className={styles.sectionTitle}>API &amp; Backend</div>
                 <div className={styles.sectionDesc}>Configure which API the app uses for blockchain data</div>
               </div>
             </div>
@@ -100,7 +100,7 @@ export default function SettingsScreen({ settings, onSave, onBack }) {
           {/* Own Node */}
           <section className={styles.section}>
             <div className={styles.sectionHeader}>
-              <span className={styles.sectionIcon}>\u26a1</span>
+              <span className={styles.sectionIcon} aria-hidden="true">⚡</span>
               <div>
                 <div className={styles.sectionTitle}>Own Node (Electrum)</div>
                 <div className={styles.sectionDesc}>Connect to your own Electrum server for maximum privacy</div>
@@ -108,13 +108,14 @@ export default function SettingsScreen({ settings, onSave, onBack }) {
             </div>
 
             <div className={styles.infoBox}>
-              <span>\ud83d\udd12</span>
+              <span>🔒</span>
               <span>Connecting to your own Electrum server means your addresses are never sent to a third-party. Run <code>electrs</code>, <code>Fulcrum</code>, or <code>ElectrumX</code> locally or on your home server.</span>
             </div>
 
             <div className={styles.fieldRow}>
               <div className={styles.field} style={{flex: 3}}>
                 <label className={styles.label}>Electrum host</label>
+                <div className={styles.fieldDesc}>Hostname or .onion address</div>
                 <input
                   className={styles.input}
                   type="text"
@@ -126,6 +127,7 @@ export default function SettingsScreen({ settings, onSave, onBack }) {
               </div>
               <div className={styles.field} style={{flex: 1}}>
                 <label className={styles.label}>Port</label>
+                <div className={styles.fieldDesc}>Default: 50002</div>
                 <input
                   className={styles.input}
                   type="number"
@@ -153,7 +155,7 @@ export default function SettingsScreen({ settings, onSave, onBack }) {
           {/* Tor */}
           <section className={styles.section}>
             <div className={styles.sectionHeader}>
-              <span className={styles.sectionIcon}>\ud83e\uddc5</span>
+              <span className={styles.sectionIcon} aria-hidden="true">🧅</span>
               <div>
                 <div className={styles.sectionTitle}>Tor / Proxy</div>
                 <div className={styles.sectionDesc}>Route API requests through a SOCKS5 proxy for IP privacy</div>
@@ -161,12 +163,13 @@ export default function SettingsScreen({ settings, onSave, onBack }) {
             </div>
 
             <div className={styles.infoBox}>
-              <span>\u2139\ufe0f</span>
+              <span>ℹ️</span>
               <span>The backend (Python/Vercel) must support SOCKS5 proxying. Set this to <code>socks5://127.0.0.1:9050</code> if running the backend locally with Tor Browser or the Tor daemon active.</span>
             </div>
 
             <div className={styles.field}>
               <label className={styles.label}>SOCKS5 proxy URL</label>
+              <div className={styles.fieldDesc}>Leave empty to disable proxy</div>
               <input
                 className={styles.input}
                 type="text"
@@ -181,7 +184,7 @@ export default function SettingsScreen({ settings, onSave, onBack }) {
           {/* Scan behaviour */}
           <section className={styles.section}>
             <div className={styles.sectionHeader}>
-              <span className={styles.sectionIcon}>\u2699\ufe0f</span>
+              <span className={styles.sectionIcon} aria-hidden="true">⚙️</span>
               <div>
                 <div className={styles.sectionTitle}>Scan Behaviour</div>
                 <div className={styles.sectionDesc}>Tune performance and scanning parameters</div>
@@ -189,11 +192,11 @@ export default function SettingsScreen({ settings, onSave, onBack }) {
             </div>
 
             <div className={styles.fieldRow}>
-              <div className={styles.field}>
+              <div className={styles.fieldCol}>
                 <label className={styles.label}>Request delay (ms)</label>
                 <div className={styles.fieldDesc}>Delay between Blockstream/Mempool requests to avoid rate-limiting</div>
                 <input
-                  className={styles.input}
+                  className={`${styles.input} ${styles.inputBottom}`}
                   type="number"
                   min="0"
                   max="5000"
@@ -203,11 +206,11 @@ export default function SettingsScreen({ settings, onSave, onBack }) {
                 />
               </div>
 
-              <div className={styles.field}>
+              <div className={styles.fieldCol}>
                 <label className={styles.label}>Batch size</label>
                 <div className={styles.fieldDesc}>Addresses per scan batch</div>
                 <input
-                  className={styles.input}
+                  className={`${styles.input} ${styles.inputBottom}`}
                   type="number"
                   min="10"
                   max="200"
@@ -217,11 +220,11 @@ export default function SettingsScreen({ settings, onSave, onBack }) {
                 />
               </div>
 
-              <div className={styles.field}>
+              <div className={styles.fieldCol}>
                 <label className={styles.label}>Gap limit</label>
                 <div className={styles.fieldDesc}>Consecutive empty addresses before stopping (BIP44: 20)</div>
                 <input
-                  className={styles.input}
+                  className={`${styles.input} ${styles.inputBottom}`}
                   type="number"
                   min="5"
                   max="100"
@@ -237,7 +240,7 @@ export default function SettingsScreen({ settings, onSave, onBack }) {
               Reset to defaults
             </button>
             <button type="submit" className={styles.saveBtn}>
-              {saved ? '\u2713 Saved' : 'Save settings'}
+              {saved ? '✓ Saved' : 'Save settings'}
             </button>
           </div>
 
