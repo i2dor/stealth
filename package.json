@@ -1,0 +1,7 @@
+{
+  "name": "stealth-root",
+  "private": true,
+  "scripts": {
+    "build": "cd frontend && yarn install && yarn build && cp -r dist ../public"
+  }
+}

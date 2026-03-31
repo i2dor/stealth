@@ -4,13 +4,6 @@
     {
       "src": "api/scan.py",
       "use": "@vercel/python"
-    },
-    {
-      "src": "frontend/package.json",
-      "use": "@vercel/static-build",
-      "config": {
-        "distDir": "frontend/dist"
-      }
     }
   ],
   "routes": [
