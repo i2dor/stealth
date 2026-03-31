@@ -9,8 +9,9 @@ from collections import defaultdict
 import requests
 from bip_utils import Bip32Secp256k1, P2WPKHAddrEncoder, CoinsConf
 
-# Configurable via environment variable; defaults to Blockstream public API
-API_BASE = os.environ.get("ESPLORA_API_URL", "https://blockstream.info/api").rstrip("/")
+_primary = os.environ.get("ESPLORA_API_URL", "https://blockstream.info/api").rstrip("/")
+_fallback = os.environ.get("ESPLORA_FALLBACK_URL", "https://mempool.space/api").rstrip("/")
+API_BASE = _primary
 
 SLIP132_TO_BIP32 = {
     "xpub": ("0488b21e", "0488b21e"),
@@ -132,10 +133,15 @@ def derive_wpkh_addresses(extpub, count, branch, start_index=0):
     return addrs
 
 def api_get(path):
-    url = f"{API_BASE}{path}"
-    r = session.get(url, timeout=(5, 10))
-    r.raise_for_status()
-    return r.json()
+    for base in (_primary, _fallback):
+        try:
+            url = f"{base}{path}"
+            r = session.get(url, timeout=(5, 10))
+            r.raise_for_status()
+            return r.json()
+        except Exception as e:
+            debug(f"api_get failed on {base}: {e}, trying fallback...")
+    raise RuntimeError(f"All API endpoints failed for path: {path}")
 
 def address_stats(address):
     return api_get(f"/address/{address}")
@@ -241,6 +247,7 @@ def collect_wallet_data(addresses):
 
     return tx_map, addr_txs, utxos, active_addresses
 
+
 class TxGraph:
     def __init__(self, addr_map, tx_map, addr_txs, utxos):
         self.addr_map = addr_map
@@ -271,6 +278,7 @@ class TxGraph:
             })
         return addrs
 
+
 def detect_address_reuse(g):
     findings = []
     for addr in g.our_addrs:
@@ -292,6 +300,7 @@ def detect_address_reuse(g):
             })
     return findings
 
+
 def detect_dust(g):
     findings = []
     for u in g.utxos:
@@ -310,6 +319,7 @@ def detect_dust(g):
                 "correction": "Avoid spending dust with normal inputs.",
             })
     return findings
+
 
 def detect_cioh(g):
     findings = []
@@ -332,6 +342,7 @@ def detect_cioh(g):
             })
     return findings
 
+
 def build_addr_map(addresses, branch, start_index=0):
     addr_map = {}
     for i, addr in enumerate(addresses, start=start_index):
@@ -341,6 +352,7 @@ def build_addr_map(addresses, branch, start_index=0):
             "index": i,
         }
     return addr_map
+
 
 def scan_branch(parsed, offset, count, branch):
     addresses = derive_wpkh_addresses(parsed["extpub"], count, branch, start_index=offset)
@@ -377,11 +389,8 @@ def scan_branch(parsed, offset, count, branch):
         },
     }
 
+
 def run_scan(descriptor: str, offset: int = 0, count: int = 20) -> dict:
-    """
-    Main entry point for programmatic use (called from scan.py handler).
-    Returns the report dict directly instead of printing JSON.
-    """
     if offset < 0:
         raise ValueError("offset must be >= 0")
     if count <= 0 or count > 500:
