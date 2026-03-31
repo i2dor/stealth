@@ -82,6 +82,11 @@ export default function App() {
   const [reportCache, setReportCache] = useState({})
   const [settings, setSettings] = useState(DEFAULT_SETTINGS)
 
+  // Merge torProxy from settings into scan options so walletService can use it
+  function buildScanOptions(opts) {
+    return { ...opts, torProxy: settings.torProxy || '' }
+  }
+
   async function loadBatch(desc, nextOffset = 0, options = { extendAggregate: true }, scanOpts) {
     setDescriptor(desc)
     setError('')
@@ -104,7 +109,13 @@ export default function App() {
 
     try {
       const apiBase = settings.apiBase || ''
-      const result = await analyzeWallet(desc, nextOffset, parseInt(settings.scanBatchSize) || SCAN_BATCH_SIZE, opts, apiBase)
+      const result = await analyzeWallet(
+        desc,
+        nextOffset,
+        parseInt(settings.scanBatchSize) || SCAN_BATCH_SIZE,
+        buildScanOptions(opts),
+        apiBase
+      )
 
       console.log('Scan offset:', nextOffset, 'opts:', opts)
       console.log('Result:', result)

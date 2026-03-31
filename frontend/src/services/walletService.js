@@ -1,5 +1,5 @@
 export const analyzeWallet = async (descriptor, offset = 0, count = 60, options = {}, apiBase = '') => {
-  const { branch = 'receive', auto = false } = options
+  const { branch = 'receive', auto = false, torProxy = '' } = options
 
   const params = new URLSearchParams({
     descriptor,
@@ -8,6 +8,10 @@ export const analyzeWallet = async (descriptor, offset = 0, count = 60, options 
     branch,
     auto: auto ? '1' : '0',
   })
+
+  if (torProxy && torProxy.trim()) {
+    params.set('tor_proxy', torProxy.trim())
+  }
 
   const base = apiBase || (typeof import.meta !== 'undefined' ? (import.meta.env.VITE_API_BASE || '') : '')
   const url = `${base}/api/scan?${params.toString()}`
