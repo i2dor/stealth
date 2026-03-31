@@ -231,7 +231,6 @@ def collect_wallet_data(addresses):
     addr_txs = defaultdict(list)
     utxos = []
     active_addresses = []
-    # Maps address -> list of all received outputs (including spent ones)
     addr_received_outputs = defaultdict(list)
 
     for addr in addresses:
@@ -277,7 +276,6 @@ def collect_wallet_data(addresses):
                 if vout.get("scriptpubkey_address") == addr:
                     received = True
                     recv_value += vout.get("value", 0)
-                    # Track every output received to this address (for dust history)
                     addr_received_outputs[addr].append({
                         "txid": txid,
                         "value": vout.get("value", 0),
@@ -329,7 +327,6 @@ class TxGraph:
         self.addr_txs = addr_txs
         self.utxos = utxos
         self.our_txids = set(tx_map.keys())
-        # address -> [{txid, value, n}] for every output ever received
         self.addr_received_outputs = addr_received_outputs or defaultdict(list)
 
     def fetch_tx(self, txid):
@@ -372,7 +369,6 @@ class TxGraph:
         meta = self.addr_map.get(address)
         if meta:
             return meta.get("type", "unknown")
-        # Heuristic from address prefix (mainnet + testnet)
         if address.startswith(("bc1q", "tb1q", "bcrt1q")):
             return "p2wpkh"
         if address.startswith(("bc1p", "tb1p", "bcrt1p")):
@@ -589,13 +585,11 @@ def detect_change_detection(g):
                 pay_sats = satoshis(payment["value"])
                 pay_round = (pay_sats % 100_000 == 0 or pay_sats % 1_000_000 == 0)
 
-                # Heuristic 1: round payment, non-round change
                 if pay_round and not ch_round:
                     problems.append(
                         f"Round payment ({pay_sats:,} sats) vs non-round change ({ch_sats:,} sats)"
                     )
 
-                # Heuristic 2: change script type differs from payment type
                 in_types = {g.get_script_type(ia["address"]) for ia in our_in}
                 ch_type = g.get_script_type(change["address"])
                 pay_type = g.get_script_type(payment["address"])
@@ -604,7 +598,6 @@ def detect_change_detection(g):
                         f"Change script type ({ch_type}) matches input but differs from payment ({pay_type})"
                     )
 
-            # Heuristic 3: internal derivation path (/1/*)
             ch_meta = g.addr_map.get(change["address"], {})
             if ch_meta.get("internal"):
                 if "BIP-44 internal path" not in " ".join(problems):
@@ -805,7 +798,6 @@ def detect_utxo_age_spread(g):
     if len(our_utxos) < 2:
         return findings
 
-    # Filter to UTXOs with known blockheight
     aged = [u for u in our_utxos if u.get("blockheight", 0) > 0]
     if len(aged) < 2:
         return findings
@@ -895,7 +887,6 @@ def detect_exchange_origin(g):
         our_outputs = [o for o in our_outputs if g.is_ours(o["address"])]
 
         if our_inputs:
-            # We're a sender in a many-output TX — that's our batch, not exchange
             continue
         if not our_outputs:
             continue
@@ -941,6 +932,76 @@ def detect_exchange_origin(g):
                     "Withdraw via Lightning Network instead of on-chain to avoid the exchange-origin fingerprint. "
                     "If on-chain withdrawal is required, pass the UTXO through a CoinJoin before using it for "
                     "other payments so the exchange link is severed from your subsequent spending history."
+                ),
+            })
+
+    return findings
+
+
+def detect_tainted_utxo_merge(g):
+    """
+    Detect transactions that merge a UTXO received directly from an exchange
+    (EXCHANGE_ORIGIN pattern) with UTXOs from other unrelated sources.
+    This is a higher-severity specialization of CLUSTER_MERGE for the KYC-taint case.
+    """
+    findings = []
+    BATCH_THRESHOLD = 5
+
+    # First, identify txids that look like exchange batch withdrawals
+    exchange_txids = set()
+    for txid in g.our_txids:
+        tx = g.fetch_tx(txid)
+        if not tx:
+            continue
+        vouts = tx.get("vout", [])
+        if len(vouts) < BATCH_THRESHOLD:
+            continue
+        our_inputs = [ia for ia in g.get_input_addresses(txid) if g.is_ours(ia["address"])]
+        if our_inputs:
+            continue
+        our_outputs = [o for o in g.get_output_addresses(txid) if g.is_ours(o["address"])]
+        if our_outputs:
+            exchange_txids.add(txid)
+
+    if not exchange_txids:
+        return findings
+
+    # Now find spending transactions that mix exchange UTXOs with others
+    for txid in g.our_txids:
+        input_addrs = g.get_input_addresses(txid)
+        if len(input_addrs) < 2:
+            continue
+
+        our_in = [ia for ia in input_addrs if g.is_ours(ia["address"])]
+        if len(our_in) < 2:
+            continue
+
+        tainted = [ia for ia in our_in if ia.get("txid") in exchange_txids]
+        clean = [ia for ia in our_in if ia.get("txid") not in exchange_txids]
+
+        if tainted and clean:
+            findings.append({
+                "type": "TAINTED_UTXO_MERGE",
+                "severity": "HIGH",
+                "description": (
+                    f"TX {txid[:16]}\u2026 mixes {len(tainted)} exchange-origin (KYC-tainted) "
+                    f"input(s) with {len(clean)} unrelated input(s) — links your identity to all inputs."
+                ),
+                "details": {
+                    "txid": txid,
+                    "tainted_inputs": [
+                        {"address": ia["address"], "from_exchange_tx": ia["txid"][:16]}
+                        for ia in tainted
+                    ],
+                    "clean_inputs": [
+                        {"address": ia["address"], "amount_btc": round(ia["value"], 8)}
+                        for ia in clean
+                    ],
+                },
+                "correction": (
+                    "Never merge exchange-origin UTXOs with unrelated UTXOs. "
+                    "First pass the exchange UTXO through a CoinJoin (Whirlpool, JoinMarket) to break the KYC link, "
+                    "then spend the mixed output separately."
                 ),
             })
 
@@ -1007,7 +1068,6 @@ def detect_behavioral_fingerprint(g):
                 if sats > 0 and (sats % 100_000 == 0 or sats % 1_000_000 == 0):
                     uses_round_amounts += 1
 
-        # Fee rate from Esplora fee field
         fee = tx.get("fee", 0)
         weight = tx.get("weight", 0)
         vsize = max(1, (weight + 3) // 4) if weight else 0
@@ -1016,7 +1076,6 @@ def detect_behavioral_fingerprint(g):
 
     problems = []
 
-    # 1. Round amounts
     if total_payments > 0:
         round_pct = uses_round_amounts / total_payments * 100
         if round_pct > 60:
@@ -1025,14 +1084,12 @@ def detect_behavioral_fingerprint(g):
                 "a distinctive behavioral pattern that aids clustering."
             )
 
-    # 2. Uniform output count
     if output_counts and all(c == output_counts[0] for c in output_counts) and len(output_counts) >= 3:
         problems.append(
             f"Uniform output count: all {len(output_counts)} send TXs have exactly "
             f"{output_counts[0]} outputs — consistent structure aids fingerprinting."
         )
 
-    # 3. Script type consistency / legacy usage
     input_types_set = set(input_script_types)
     if len(input_types_set) > 1:
         problems.append(
@@ -1045,7 +1102,6 @@ def detect_behavioral_fingerprint(g):
             "This alone narrows your anonymity set significantly."
         )
 
-    # 4. RBF signaling consistency
     if rbf_signals:
         rbf_pct = sum(rbf_signals) / len(rbf_signals) * 100
         if rbf_pct == 100:
@@ -1059,7 +1115,6 @@ def detect_behavioral_fingerprint(g):
                 "uncommon in modern wallets, distinguishes your software."
             )
 
-    # 5. Locktime pattern
     if locktime_values and len(locktime_values) >= 3:
         nonzero_lt = [lt for lt in locktime_values if lt > 0]
         if len(nonzero_lt) == len(locktime_values):
@@ -1073,7 +1128,6 @@ def detect_behavioral_fingerprint(g):
                 "Distinguishes your wallet from Bitcoin Core / Electrum defaults."
             )
 
-    # 6. Fee rate consistency
     if len(fee_rates) >= 3:
         avg_fee = sum(fee_rates) / len(fee_rates)
         if avg_fee > 0:
@@ -1086,7 +1140,6 @@ def detect_behavioral_fingerprint(g):
                     f"(CV={cv:.2f}) — low variance suggests fixed-fee-rate wallet configuration."
                 )
 
-    # 7. Change/payment script type mismatch
     if change_address_types_used and payment_address_types_used:
         if change_address_types_used != payment_address_types_used:
             problems.append(
@@ -1094,7 +1147,6 @@ def detect_behavioral_fingerprint(g):
                 f"payments ({payment_address_types_used}) — trivially identifies change outputs."
             )
 
-    # 8. Unusual input count uniformity
     if n_inputs_list and len(n_inputs_list) >= 3:
         if all(n == n_inputs_list[0] for n in n_inputs_list) and n_inputs_list[0] > 1:
             problems.append(
@@ -1344,7 +1396,6 @@ def scan_branch(parsed, offset, count, branch):
     findings = []
     warnings = []
 
-    # Original detectors
     findings.extend(detect_address_reuse(graph))
     findings.extend(detect_dust(graph))
     findings.extend(detect_dust_spending(graph))
@@ -1353,15 +1404,16 @@ def scan_branch(parsed, offset, count, branch):
     findings.extend(detect_whirlpool_patterns(graph))
     findings.extend(detect_fee_fingerprinting(graph))
 
-    # Ported from detect.py
+    # Ported / extended detectors
     findings.extend(detect_change_detection(graph))
     findings.extend(detect_consolidation(graph))
     findings.extend(detect_script_type_mixing(graph))
     findings.extend(detect_cluster_merge(graph))
+    findings.extend(detect_tainted_utxo_merge(graph))
     findings.extend(detect_exchange_origin(graph))
     findings.extend(detect_behavioral_fingerprint(graph))
 
-    # Age/dormancy — some findings go into warnings
+    # Age/dormancy — dormant goes to warnings
     age_findings = detect_utxo_age_spread(graph)
     for f in age_findings:
         if f["type"] == "DORMANT_UTXOS":
@@ -1424,12 +1476,13 @@ def _merge_branch_reports(reports):
                 seen_finding_keys.add(key)
                 all_findings.append(f)
 
-        for w in r["warnings"]:
-            txid = w.get("txid") or (w.get("details") or {}).get("txid", "")
-            addr = w.get("address") or (w.get("details") or {}).get("address", "")
-            key = f"{w['type']}::{addr}::{txid}::{w.get('description', '')}"
+        for warning in r["warnings"]:
+            txid = warning.get("txid") or (warning.get("details") or {}).get("txid", "")
+            addr = warning.get("address") or (warning.get("details") or {}).get("address", "")
+            key = f"{warning['type']}::{addr}::{txid}::{warning.get('description', '')}"
             if key not in seen_finding_keys:
-                seen_finding_keys.add(key)\n                all_warnings.append(w)
+                seen_finding_keys.add(key)
+                all_warnings.append(warning)
 
     return {
         "stats": {
