@@ -24,13 +24,11 @@ MAX_AUTO_ADDRESSES = int(os.environ.get("MAX_AUTO_ADDRESSES", "500"))
 
 # Whirlpool known pool denominations in satoshis
 WHIRLPOOL_POOL_AMOUNTS = {100_000, 1_000_000, 5_000_000, 50_000_000}
-# Dust threshold (BIP 141 / relay minimum)
+# Dust threshold — anything at or below this is flagged
 DUST_LIMIT_SATS = 1000
-# Classic dust threshold used by many wallets
-DUST_CLASSIC_SATS = 546
-# Max fee rate considered "normal" (sat/vB)
+# High fee threshold
 HIGH_FEE_THRESHOLD = 50
-# Round-number payment detection threshold (sats)
+# Round-number payment detection
 ROUND_AMOUNT_SATS = [100_000, 500_000, 1_000_000, 5_000_000, 10_000_000,
                      50_000_000, 100_000_000]
 
@@ -54,24 +52,18 @@ _request_count = 0
 _scan_start_offset = 0
 
 
-def configure_proxy(proxy_url: str | None):
+def configure_proxy(proxy_url):
     """
-    Configure the shared requests session to route through a SOCKS5 proxy.
-    Pass None or empty string to clear any existing proxy.
-
-    Example: configure_proxy("socks5h://127.0.0.1:9050")
-    Requires: pip install requests[socks]  (installs PySocks)
-    socks5h ensures DNS resolution also goes through the proxy (no hostname leaks).
+    Route all API requests through a SOCKS5 proxy (e.g. Tor).
+    Pass None or empty string to clear.
+    Requires: pip install requests[socks]
     """
     if proxy_url:
-        session.proxies = {
-            "http": proxy_url,
-            "https": proxy_url,
-        }
+        session.proxies = {"http": proxy_url, "https": proxy_url}
         debug(f"[proxy] Routing requests through {proxy_url}")
     else:
         session.proxies = {}
-        debug("[proxy] No proxy configured — direct connections")
+        debug("[proxy] No proxy — direct connections")
 
 
 def debug(*args):
@@ -237,10 +229,10 @@ def address_utxos(address):
 def collect_wallet_data(addresses):
     tx_map = {}
     addr_txs = defaultdict(list)
-    # addr_received_outputs: addr -> list of {txid, vout_index, value_sats, spent}
-    addr_received_outputs = defaultdict(list)
     utxos = []
     active_addresses = []
+    # Maps address -> list of all received outputs (including spent ones)
+    addr_received_outputs = defaultdict(list)
 
     for addr in addresses:
         try:
@@ -267,14 +259,6 @@ def collect_wallet_data(addresses):
             debug(f"tx error for {addr}: {e}")
             txs = []
 
-        # Build a set of txids that spend from this address (for dust history)
-        spending_txids = set()
-        for tx in txs:
-            for vin in tx.get("vin", []):
-                prev = vin.get("prevout") or {}
-                if prev.get("scriptpubkey_address") == addr:
-                    spending_txids.add(tx["txid"])
-
         for tx in txs:
             txid = tx["txid"]
             tx_map[txid] = tx
@@ -289,17 +273,15 @@ def collect_wallet_data(addresses):
                     sent = True
                     spend_value += prev.get("value", 0)
 
-            for vout_idx, vout in enumerate(tx.get("vout", [])):
+            for vout in tx.get("vout", []):
                 if vout.get("scriptpubkey_address") == addr:
                     received = True
-                    val = vout.get("value", 0)
-                    recv_value += val
-                    # Track each received output individually for dust detection
+                    recv_value += vout.get("value", 0)
+                    # Track every output received to this address (for dust history)
                     addr_received_outputs[addr].append({
                         "txid": txid,
-                        "vout": vout_idx,
-                        "value_sats": val,
-                        "spent": txid in spending_txids,  # approximate: this tx was spent FROM addr
+                        "value": vout.get("value", 0),
+                        "n": vout.get("n", 0),
                     })
 
             if received:
@@ -347,6 +329,7 @@ class TxGraph:
         self.addr_txs = addr_txs
         self.utxos = utxos
         self.our_txids = set(tx_map.keys())
+        # address -> [{txid, value, n}] for every output ever received
         self.addr_received_outputs = addr_received_outputs or defaultdict(list)
 
     def fetch_tx(self, txid):
@@ -377,79 +360,61 @@ class TxGraph:
 
 def detect_address_reuse(g):
     """
-    Detects two distinct reuse patterns:
-    1. RECEIVE×N — same address received funds in 2+ separate transactions (classic reuse).
-    2. SEND+RECEIVE — address was both a recipient and a sender (spent from a receive address).
-       Both patterns link transaction history and balances on-chain.
+    Flag any wallet address that received funds in 2+ distinct transactions.
+    Checks both unspent and historical (spent) receives.
     """
     findings = []
     for addr in g.our_addrs:
-        entries = g.addr_txs.get(addr, [])
-        receive_txids = {e["txid"] for e in entries if e["category"] == "receive"}
-        send_txids = {e["txid"] for e in entries if e["category"] == "send"}
+        # Collect all unique receive txids from addr_txs AND addr_received_outputs
+        receive_txids = set()
+        for entry in g.addr_txs.get(addr, []):
+            if entry["category"] == "receive":
+                receive_txids.add(entry["txid"])
+        for out in g.addr_received_outputs.get(addr, []):
+            receive_txids.add(out["txid"])
 
-        # Pattern 1: received on same address multiple times
         if len(receive_txids) >= 2:
             findings.append({
                 "type": "ADDRESS_REUSE",
                 "severity": "HIGH",
                 "description": (
-                    f"Address {addr[:12]}… received funds in {len(receive_txids)} separate transactions. "
-                    "Each receipt links those payments together on-chain."
+                    f"Address {addr[:12]}\u2026 reused: received funds in "
+                    f"{len(receive_txids)} separate transaction(s)."
                 ),
                 "details": {
                     "address": addr,
-                    "pattern": "receive_reuse",
-                    "receive_tx_count": len(receive_txids),
+                    "receive_count": len(receive_txids),
                     "txids": sorted(receive_txids)[:10],
                 },
-                "correction": "Generate a fresh address for every payment received (BIP44 gap-limit).",
+                "correction": "Generate a fresh address for every payment. BIP44 wallets do this automatically — never reuse addresses manually.",
             })
-
-        # Pattern 2: address received AND later spent from — reveals it was a receive address
-        elif receive_txids and send_txids:
-            findings.append({
-                "type": "ADDRESS_REUSE",
-                "severity": "MEDIUM",
-                "description": (
-                    f"Address {addr[:12]}… was used to receive and later spent from. "
-                    "Spending from a receive address links your identity as both recipient and sender."
-                ),
-                "details": {
-                    "address": addr,
-                    "pattern": "receive_then_spend",
-                    "receive_txids": sorted(receive_txids)[:5],
-                    "spend_txids": sorted(send_txids)[:5],
-                },
-                "correction": (
-                    "Use separate change addresses (branch /1) for spending. "
-                    "Never reuse a receive address as a change output."
-                ),
-            })
-
     return findings
 
 
 def detect_dust(g):
     """
-    Detects dust in two ways:
-    1. UNSPENT dust — current UTXOs below the dust threshold (original detector).
-    2. HISTORICAL dust — outputs received in past transactions that were tiny,
-       indicating a dust attack even if already spent.
+    Detect dust in two ways:
+    1. Unspent dust UTXOs currently in the wallet (active risk)
+    2. Historical dust outputs received (already spent — still reveals a dust attack attempt)
     """
     findings = []
-    seen_txids = set()
+    # Set of (address, txid, n) already reported to avoid duplicates
+    reported = set()
 
-    # 1. Unspent dust UTXOs
+    # 1. Current unspent dust UTXOs
+    current_unspent_txids = {(u["address"], u["txid"], u["vout"]) for u in g.utxos}
     for u in g.utxos:
         sats = satoshis(u["amount"])
         if sats <= DUST_LIMIT_SATS and g.is_ours(u.get("address", "")):
+            key = (u["address"], u["txid"], u["vout"])
+            reported.add(key)
+            severity = "HIGH" if sats <= 546 else "MEDIUM"
             findings.append({
                 "type": "DUST",
-                "severity": "HIGH" if sats <= DUST_CLASSIC_SATS else "MEDIUM",
+                "severity": severity,
                 "description": (
-                    f"Unspent dust UTXO at {u['address'][:12]}… ({sats:,} sats). "
-                    "Spending it alongside normal inputs links your UTXOs together."
+                    f"Unspent dust UTXO at {u['address'][:12]}\u2026 "
+                    f"({sats:,} sats). If spent with other inputs, it links your UTXOs together."
                 ),
                 "details": {
                     "address": u["address"],
@@ -458,105 +423,34 @@ def detect_dust(g):
                     "vout": u["vout"],
                     "status": "unspent",
                 },
-                "correction": "Do not spend dust with normal UTXOs — use a dust sweeper or ignore it.",
+                "correction": "Do not spend this dust. Use coin control to exclude it, or consolidate with a dedicated coinjoin tool.",
             })
-            seen_txids.add(u["txid"])
 
-    # 2. Historical dust outputs received (potential dust attacks, already spent)
+    # 2. Historical dust outputs (already spent) — dust attack evidence
     for addr, outputs in g.addr_received_outputs.items():
         if not g.is_ours(addr):
             continue
         for out in outputs:
-            sats = out["value_sats"]
-            if sats > DUST_LIMIT_SATS:
-                continue
-            txid = out["txid"]
-            if txid in seen_txids:
-                continue  # already reported as unspent dust
-            seen_txids.add(txid)
-            findings.append({
-                "type": "DUST",
-                "severity": "MEDIUM",
-                "description": (
-                    f"Address {addr[:12]}… received a dust output of {sats:,} sats "
-                    f"(tx {txid[:12]}…). This is a common dust-attack pattern used to trace wallets."
-                ),
-                "details": {
-                    "address": addr,
-                    "sats": sats,
-                    "txid": txid,
-                    "vout": out["vout"],
-                    "status": "historical",
-                },
-                "correction": (
-                    "Do not spend this dust output — spending it links your other UTXOs to your identity. "
-                    "Mark it as 'do not spend' in your wallet."
-                ),
-            })
-
-    return findings
-
-
-def detect_dust_spending(g):
-    """
-    Detects transactions where a dust input is co-spent with larger normal inputs,
-    actively linking UTXOs via the Common Input Ownership Heuristic.
-    """
-    findings = []
-
-    # Build set of dust UTXOs by (txid, vout)
-    dust_utxo_keys = set()
-    for addr, outputs in g.addr_received_outputs.items():
-        if not g.is_ours(addr):
-            continue
-        for out in outputs:
-            if out["value_sats"] <= DUST_LIMIT_SATS:
-                dust_utxo_keys.add((out["txid"], out["vout"]))
-
-    if not dust_utxo_keys:
-        return findings
-
-    for txid in g.our_txids:
-        tx = g.fetch_tx(txid)
-        if not tx:
-            continue
-
-        inputs = tx.get("vin", [])
-        if len(inputs) < 2:
-            continue
-
-        dust_inputs = []
-        normal_inputs = []
-        for vin in inputs:
-            prev_txid = vin.get("txid", "")
-            prev_vout = vin.get("vout", 0)
-            prev = vin.get("prevout") or {}
-            val = prev.get("value", 0)
-            addr = prev.get("scriptpubkey_address", "")
-
-            if (prev_txid, prev_vout) in dust_utxo_keys and g.is_ours(addr):
-                dust_inputs.append({"txid": prev_txid, "vout": prev_vout, "sats": val, "address": addr})
-            elif g.is_ours(addr) and val > DUST_LIMIT_SATS:
-                normal_inputs.append({"address": addr, "sats": val})
-
-        if dust_inputs and normal_inputs:
-            findings.append({
-                "type": "DUST_SPENDING",
-                "severity": "HIGH",
-                "description": (
-                    f"TX {txid[:12]}… spends {len(dust_inputs)} dust input(s) alongside "
-                    f"{len(normal_inputs)} normal input(s), actively linking your UTXOs."
-                ),
-                "details": {
-                    "txid": txid,
-                    "dust_inputs": dust_inputs[:5],
-                    "normal_input_count": len(normal_inputs),
-                },
-                "correction": (
-                    "Never co-spend dust with normal UTXOs. Use coin control to exclude dust, "
-                    "or consolidate dust in a dedicated privacy-breaking sweep transaction."
-                ),
-            })
+            sats = out["value"]
+            key = (addr, out["txid"], out["n"])
+            if sats <= DUST_LIMIT_SATS and key not in reported and key not in current_unspent_txids:
+                reported.add(key)
+                findings.append({
+                    "type": "DUST",
+                    "severity": "LOW",
+                    "description": (
+                        f"Historical dust output at {addr[:12]}\u2026 "
+                        f"({sats:,} sats, already spent). Indicates a past dust attack attempt."
+                    ),
+                    "details": {
+                        "address": addr,
+                        "sats": sats,
+                        "txid": out["txid"],
+                        "vout": out["n"],
+                        "status": "spent",
+                    },
+                    "correction": "This dust was already spent — if merged with other UTXOs in the same transaction, your addresses may have been linked. Review the spending transaction.",
+                })
 
     return findings
 
@@ -572,11 +466,12 @@ def detect_cioh(g):
             findings.append({
                 "type": "CIOH",
                 "severity": "HIGH",
-                "description": f"TX {txid[:12]}… merges {len(our_inputs)} of your inputs, linking them on-chain.",
+                "description": f"TX {txid[:16]}\u2026 merges {len(our_inputs)} of your inputs — all are assumed to belong to the same owner.",
                 "details": {
                     "txid": txid,
                     "our_inputs": len(our_inputs),
                     "total_inputs": len(inputs),
+                    "our_input_addresses": [i["address"] for i in our_inputs][:5],
                 },
                 "correction": "Use coin control to avoid merging multiple UTXOs in a single transaction.",
             })
@@ -610,7 +505,7 @@ def detect_payjoin_interaction(g):
                 "type": "PAYJOIN_INTERACTION",
                 "severity": "LOW",
                 "description": (
-                    f"TX {txid[:16]}… has mixed inputs (yours + external) and outputs to your wallet. "
+                    f"TX {txid[:16]}\u2026 has mixed inputs (yours + external) and outputs to your wallet. "
                     "Consistent with a PayJoin/P2EP transaction."
                 ),
                 "details": {
@@ -620,7 +515,7 @@ def detect_payjoin_interaction(g):
                     "our_outputs": len(our_output_addrs),
                 },
                 "correction": (
-                    "If you intentionally used PayJoin — great, this improves privacy. "
+                    "If you intentionally used PayJoin \u2014 great, this improves privacy. "
                     "If not, an external party contributed inputs alongside yours, which could be a privacy risk."
                 ),
             })
@@ -652,7 +547,7 @@ def detect_whirlpool_patterns(g):
                         "type": "WHIRLPOOL_COINJOIN",
                         "severity": "LOW",
                         "description": (
-                            f"TX {txid[:16]}… matches Whirlpool CoinJoin pattern "
+                            f"TX {txid[:16]}\u2026 matches Whirlpool CoinJoin pattern "
                             f"({len(matching)} equal outputs of {pool_sats:,} sats)."
                         ),
                         "details": {
@@ -662,7 +557,7 @@ def detect_whirlpool_patterns(g):
                             "our_mixed_outputs": len(our_outputs),
                         },
                         "correction": (
-                            "This looks like a Whirlpool mix — good for privacy! "
+                            "This looks like a Whirlpool mix \u2014 good for privacy! "
                             "Make sure post-mix UTXOs are spent carefully to preserve the anonymity set."
                         ),
                     })
@@ -732,7 +627,7 @@ def detect_fee_fingerprinting(g):
             "severity": "LOW",
             "description": (
                 f"{len(round_fee_txids)} transaction(s) use a round fee rate "
-                "(e.g. 1, 5, 10 sat/vB) — a fingerprint of some wallet software."
+                "(e.g. 1, 5, 10 sat/vB) \u2014 a fingerprint of some wallet software."
             ),
             "details": {
                 "transactions": round_fee_txids[:10],
@@ -749,7 +644,7 @@ def detect_fee_fingerprinting(g):
             "type": "BATCH_PAYMENT_FINGERPRINT",
             "severity": "LOW",
             "description": (
-                f"{len(batch_payment_txids)} transaction(s) send to 5+ external outputs — "
+                f"{len(batch_payment_txids)} transaction(s) send to 5+ external outputs \u2014 "
                 "typical of exchange or custodial batching."
             ),
             "details": {
@@ -807,7 +702,6 @@ def scan_branch(parsed, offset, count, branch):
     warnings = []
     findings.extend(detect_address_reuse(graph))
     findings.extend(detect_dust(graph))
-    findings.extend(detect_dust_spending(graph))
     findings.extend(detect_cioh(graph))
     findings.extend(detect_payjoin_interaction(graph))
     findings.extend(detect_whirlpool_patterns(graph))
@@ -897,13 +791,12 @@ def _merge_branch_reports(reports):
     }
 
 
-def run_auto_scan(descriptor: str, branch_mode: str = "receive") -> dict:
+def run_auto_scan(descriptor, branch_mode="receive"):
     global _request_count
     _request_count = 0
 
     parsed = parse_descriptor(descriptor)
 
-    branches_to_scan = []
     if branch_mode == "change":
         branches_to_scan = [1]
     elif branch_mode == "both":
@@ -974,7 +867,7 @@ def run_auto_scan(descriptor: str, branch_mode: str = "receive") -> dict:
     return final
 
 
-def run_scan(descriptor: str, offset: int = 0, count: int = 60, branch_mode: str = "receive") -> dict:
+def run_scan(descriptor, offset=0, count=60, branch_mode="receive"):
     global _request_count
     _request_count = 0
 
