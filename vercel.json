@@ -1,5 +1,7 @@
 {
   "version": 2,
+  "buildCommand": "cd frontend && yarn install && yarn build",
+  "outputDirectory": "frontend/dist",
   "builds": [
     {
       "src": "api/scan.py",
