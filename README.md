@@ -13,7 +13,7 @@ Bitcoin transactions are pseudonymous, not anonymous. Every transaction you make
 1. **You paste a wallet descriptor** (e.g. `wpkh([a1b2c3d4/84h/0h/0h]xpub.../0/*)`) into the UI
 2. **Stealth derives Bitcoin addresses** from the descriptor using BIP32 key derivation
 3. **It fetches transaction history** for each address from Blockstream or Mempool.space
-4. **Eight heuristic detectors** analyze the transaction graph for privacy leaks
+4. **Multiple heuristic detectors** analyze the transaction graph for privacy leaks
 5. **A full report** is returned — findings with severity, descriptions, affected transactions, and how to fix each issue
 6. **Export to PDF** — download a formatted report for offline review
 
@@ -23,7 +23,7 @@ All analysis is **read-only**. Stealth never broadcasts transactions or modifies
 
 ## Supported descriptor formats
 
-| Format | Script type | Example prefix |
+| Format | Script type | Prefix |
 |---|---|---|
 | `wpkh(xpub...)` | Native SegWit (P2WPKH) | `xpub` |
 | `wpkh(zpub...)` | Native SegWit (P2WPKH) | `zpub` |
@@ -32,109 +32,230 @@ All analysis is **read-only**. Stealth never broadcasts transactions or modifies
 | `wpkh(upub...)` | Testnet Wrapped SegWit | `upub` |
 | `wpkh(vpub...)` | Testnet Native SegWit | `vpub` |
 
-Descriptors with key origin `[fingerprint/derivation/path]xpub.../branch/*` are supported. Checksum suffix `#xxxxxxxx` is stripped automatically.
+Descriptors with key origin `[fingerprint/derivation/path]xpub.../branch/*` are fully supported. Checksum suffix `#xxxxxxxx` is stripped automatically.
 
 ---
 
-## Privacy detectors
+## Detection taxonomy
 
-Stealth runs eight independent heuristic detectors on every scan:
+Stealth runs **17 independent detectors** grouped into findings (actionable privacy violations) and warnings (informational).
 
-### `CIOH` — Common Input Ownership Heuristic · **HIGH**
-When multiple UTXOs from different addresses are co-spent in a single transaction input set, blockchain analysts assume all those addresses belong to the same wallet. This is the most powerful clustering heuristic used in chain analysis.
-
-- **Triggered by:** any transaction where two or more of your wallet's addresses appear as inputs simultaneously
-- **Why it matters:** permanently links your addresses together in the public ledger
-- **How to fix:** use CoinJoin, avoid merging UTXOs, or use coin control to spend one UTXO at a time
-
----
-
-### `ADDRESS_REUSE` — Address Reuse · **HIGH**
-Bitcoin addresses are designed to be used once. Reusing an address collapses all transactions into a single identifiable cluster, making it trivial to calculate total received, track spend patterns, and link identities across payments.
-
-- **Triggered by:** any wallet address that appears as a recipient in more than one distinct transaction
-- **Why it matters:** eliminates the pseudonymity of the UTXO model
-- **How to fix:** use a wallet with proper HD key derivation and never share the same address twice
-
----
-
-### `DUST` — Dust Attack · **MEDIUM / HIGH**
-Dust attacks send tiny amounts of BTC (below 1000 satoshis) to target addresses. The dust itself is worthless — the attack works when the victim later spends the dust together with real UTXOs, linking all those addresses in a CIOH cluster.
-
-- **Triggered by:** any UTXO in the wallet at or below 1000 satoshis
-- **Why it matters:** unspent dust is a ticking time bomb — spending it reveals your wallet cluster
-- **How to fix:** never spend dust UTXOs; mark them as "do not spend" in your wallet software
-
----
-
-### `TINY_CHANGE_OUTPUT` — Tiny Change Output · **MEDIUM**
-When a transaction creates a change output that is disproportionately small relative to the payment amount, the change output is trivially identifiable. Analysts use this to distinguish payments from change, reconstructing wallet balances and payment direction.
-
-- **Triggered by:** change outputs that are less than ~5% of the largest output in the transaction
-- **Why it matters:** breaks change detection ambiguity, exposing wallet balance and payment size
-- **How to fix:** use wallets that implement change output blinding (e.g. PayJoin, or wallets with amount randomization)
-
----
-
-### `FEE_FINGERPRINTING` — Fee Rate Fingerprinting · **LOW**
-Different wallet software uses different fee calculation strategies. Round fee rates (1, 5, 10 sat/vB) are a strong fingerprint for certain wallets, and unusual fee structures narrow down the wallet software version used to create a transaction.
-
-- **Triggered by:** transactions using exact round fee rates (1, 2, 5, 10, 20, 50, 100 sat/vB)
-- **Why it matters:** links multiple transactions to the same wallet software, enabling clustering
-- **How to fix:** use wallets with randomized fee selection; avoid manually setting round fee values
-
----
-
-### `BATCH_PAYMENT_FINGERPRINT` — Batch Payment Fingerprint · **LOW**
-Transactions with 5 or more external outputs are characteristic of custodial exchange withdrawals or payment processors batching payouts. Receiving from such transactions may indicate a connection to a centralized service.
-
-- **Triggered by:** any transaction in wallet history with ≥ 5 distinct external output addresses
-- **Why it matters:** may indicate KYC-linked exchange activity in wallet history
-- **How to fix:** use peer-to-peer services for receiving; be aware of the traceability of custodial sources
-
----
-
-### `WHIRLPOOL_COINJOIN` — Whirlpool CoinJoin Detection · **LOW** (informational)
-Whirlpool is Samourai Wallet's CoinJoin implementation. Transactions with equal-value outputs matching Whirlpool pool denominations (0.001, 0.01, 0.05, or 0.5 BTC) and the correct structure are flagged as CoinJoin participation.
-
-- **Triggered by:** transactions matching Whirlpool pool amounts and input/output count patterns
-- **Severity:** LOW — CoinJoin is a **privacy improvement**; this is informational, not a vulnerability
-- **Why it matters:** post-mix spending behavior determines whether the privacy gain is preserved
-- **How to fix:** ensure post-mix UTXOs are spent carefully; avoid merging them with pre-mix coins
-
----
-
-### `PAYJOIN_INTERACTION` — PayJoin / P2EP Interaction · **LOW** (informational)
-PayJoin transactions involve inputs from both the sender and receiver, breaking the CIOH assumption. This is detected when a transaction contains inputs from both wallet addresses and external addresses.
-
-- **Triggered by:** transactions where both your addresses and external addresses appear as inputs
-- **Severity:** LOW — PayJoin is a **privacy improvement**; this is informational
-- **Why it matters:** indicates sophisticated privacy-conscious transaction behavior
-
----
-
-## Severity scale
+### Severity scale
 
 | Severity | Color | Meaning |
 |---|---|---|
-| `CRITICAL` | 🔴 Deep red | Immediate, severe privacy breach |
-| `HIGH` | 🔴 Red | Significant privacy vulnerability, high exploitation risk |
-| `MEDIUM` | 🟡 Yellow | Moderate risk; exploitable with some analyst effort |
+| `CRITICAL` | 🔴 Deep red | Immediate, severe privacy breach with full address linkage |
+| `HIGH` | 🔴 Red | Significant vulnerability with high exploitation risk |
+| `MEDIUM` | 🟡 Yellow | Moderate risk; exploitable with analyst effort |
 | `LOW` | 🟢 Green | Minor fingerprint or informational finding |
 | `INFO` | ⚪ Gray | Contextual information, no direct risk |
 
 ---
 
+### `CIOH` — Common Input Ownership Heuristic
+**Severity: CRITICAL / HIGH**
+
+When multiple UTXOs from different addresses are co-spent in a single transaction, blockchain analysts assume all those addresses belong to the same wallet. This is the most powerful address clustering heuristic used in professional chain analysis.
+
+- **CRITICAL** when 100% of inputs are yours (pure wallet consolidation)
+- **HIGH** when some inputs are external (partial ownership)
+- **Fix:** Use coin control to spend one UTXO at a time. If consolidation is necessary, do it via CoinJoin.
+
+---
+
+### `ADDRESS_REUSE` — Address Reuse
+**Severity: HIGH**
+
+Bitcoin addresses are designed to be used once. Reusing an address collapses all associated transactions into a single identifiable cluster, making it trivial to calculate total received, track spend patterns, and link counterparty identities.
+
+- **Triggered by:** any wallet address that appears as a recipient in 2+ distinct transactions
+- **Fix:** Use a wallet with proper HD key derivation. Never share the same address twice.
+
+---
+
+### `DUST` — Dust Attack Detection
+**Severity: HIGH / MEDIUM / LOW**
+
+Dust attacks send tiny amounts (≤ 1000 sats) to target addresses. The attack works when the victim later spends the dust together with real UTXOs, linking all those addresses via CIOH.
+
+- **HIGH** (≤ 546 sats): unspent dust at cryptographic dust limit — immediate risk if spent
+- **MEDIUM** (547–1000 sats): unspent dust above limit but still below safe threshold
+- **LOW**: historical dust already spent — reveals a past attack attempt
+- **Fix:** Freeze dust UTXOs in your wallet. Never spend them alongside normal UTXOs.
+
+---
+
+### `DUST_SPENDING` — Dust Co-Spending
+**Severity: HIGH**
+
+Detects transactions that actually spend dust inputs alongside normal inputs in the same transaction — the materialization of a dust attack. All co-spent addresses are now permanently linked on-chain.
+
+- **Triggered by:** any transaction mixing dust inputs (≤ 1000 sats) with normal inputs (> 10 000 sats)
+- **Fix:** If dust was already spent this way, the link is permanent. Going forward, use coin control to exclude dust UTXOs at all times.
+
+---
+
+### `CHANGE_DETECTION` — Identifiable Change Output
+**Severity: MEDIUM**
+
+Detects transactions where the change output is trivially distinguishable from the payment output using standard blockchain analysis heuristics: round payment vs. non-round change, script type mismatch between change and payment, or BIP-44 internal derivation path usage.
+
+- **Triggered by:** one or more of: round payment / non-round change, change script type matches inputs but differs from payment, change on `/1/*` internal path
+- **Fix:** Use PayJoin (BIP-78) so the change/payment distinction is broken. Select UTXOs that cover the exact payment amount (no change needed). Ensure change and payment use the same script type.
+
+---
+
+### `CONSOLIDATION` — UTXO Consolidation
+**Severity: MEDIUM**
+
+Detects UTXOs born from a prior consolidation transaction (>= 3 inputs, <= 2 outputs). Consolidations permanently link all input addresses under CIOH, and the consolidated UTXO carries that history forward.
+
+- **Triggered by:** any current UTXO whose parent transaction has 3+ inputs and 1–2 outputs
+- **Fix:** If fee savings require consolidation, do it through a CoinJoin so the link is indistinguishable from other participants.
+
+---
+
+### `SCRIPT_TYPE_MIXING` — Script Type Mixing
+**Severity: HIGH**
+
+Detects transactions that mix different input script types (P2PKH, P2SH-P2WPKH, P2WPKH, P2TR) in the same transaction. Each type combination is rare and creates a strong fingerprint that narrows your anonymity set to a tiny subset of wallets capable of producing such a transaction.
+
+- **Triggered by:** 2+ distinct input script types in a single transaction with multiple owned inputs
+- **Fix:** Migrate all funds to a single address type (preferably Taproot / P2TR). Sweep legacy UTXOs through a CoinJoin before mixing with modern address types.
+
+---
+
+### `CLUSTER_MERGE` — Cross-Origin Cluster Merge
+**Severity: HIGH**
+
+Detects transactions that merge UTXOs originating from different funding chains (different grandparent transactions). This reveals that previously separate activity clusters belong to the same wallet, merging their histories permanently.
+
+- **Triggered by:** a transaction whose inputs trace back to 2+ disjoint funding sources
+- **Fix:** Use coin control to spend UTXOs from only one funding source per transaction. Keep UTXOs from different counterparties in separate wallets or accounts.
+
+---
+
+### `UTXO_AGE_SPREAD` — UTXO Age Spread
+**Severity: LOW**
+
+Detects wallets where unspent UTXOs have significantly different ages (measured in block height). A large age spread reveals long-term holding patterns, mixing of dormant and fresh coins, and can help analysts estimate wallet activity timelines.
+
+- **Triggered by:** a spread of 10+ blocks between the oldest and newest UTXO
+- **Fix:** Prefer FIFO coin selection (spend older UTXOs first). Route very old UTXOs through a CoinJoin to reset their history before spending alongside fresh funds.
+
+---
+
+### `EXCHANGE_ORIGIN` — Exchange Withdrawal Origin
+**Severity: MEDIUM**
+
+Detects UTXOs that likely originated from an exchange batch withdrawal, identified by high output count (5+), many unique recipients, and high input/median-output value ratio. Funds received this way carry a KYC fingerprint linking them to a centralized custodian.
+
+- **Triggered by:** 2+ signals matched: output count ≥ 5, unique recipient count ≥ 5, input/median-output ratio > 10x
+- **Fix:** Withdraw via Lightning Network instead of on-chain. If on-chain, pass the UTXO through a CoinJoin before using it for other payments.
+
+---
+
+### `TAINTED_UTXO_MERGE` — KYC-Tainted UTXO Merge
+**Severity: HIGH**
+
+A higher-severity specialization of CLUSTER_MERGE for the KYC case: detects transactions that merge a UTXO received directly from an exchange batch withdrawal with UTXOs from unrelated sources. This links your verified identity (from the exchange) to all other inputs in the transaction.
+
+- **Triggered by:** a spending transaction that mixes one or more exchange-origin UTXOs with non-exchange UTXOs
+- **Fix:** Never merge exchange-origin UTXOs with unrelated UTXOs. First pass the exchange UTXO through a CoinJoin to break the KYC link.
+
+---
+
+### `BEHAVIORAL_FINGERPRINT` — Behavioral Fingerprint
+**Severity: MEDIUM**
+
+Analyzes your entire sending history (3+ transactions required) for consistent behavioral patterns that make you identifiable: round payment amounts, uniform output counts, consistent fee rates, RBF signaling patterns, anti-fee-sniping locktime usage, and change/payment script type mismatch. Each pattern individually is minor; multiple patterns together create a strong cross-transaction fingerprint.
+
+- **Triggered by:** 3+ send transactions with 1+ of the following patterns:
+  - > 60% of payments are round numbers (multiples of 100,000 or 1,000,000 sats)
+  - All send transactions have identical output count
+  - Mixed input script types across transactions
+  - RBF always enabled or always disabled (100% or 0%)
+  - Locktime always non-zero (Bitcoin Core / Electrum) or always zero
+  - Very consistent fee rate (coefficient of variation < 0.15)
+  - Change uses different script type than payments
+  - Always exactly N inputs per transaction
+- **Fix:** Use wallet software with anti-fingerprinting defaults. Add small random satoshi offsets to payment amounts. Standardize on Taproot to reduce script-type distinctiveness.
+
+---
+
+### `DORMANT_UTXOS` — Dormant UTXOs *(warning)*
+**Severity: LOW**
+
+Detects UTXOs that are significantly older than the newest UTXO in the wallet (>= 100 block gap). Long-dormant coins create obvious age anomalies and suggest hoarding patterns that can help analysts identify wallet behavior over time.
+
+- **Triggered by:** 1+ UTXOs with a block height >= 100 blocks older than the newest UTXO
+- **Reported as:** warning (not finding) since dormancy is behavioral, not a direct vulnerability
+- **Fix:** Route old UTXOs through a CoinJoin to reset their history, or spend with FIFO coin selection.
+
+---
+
+### `PAYJOIN_INTERACTION` — PayJoin / P2EP *(informational)*
+**Severity: LOW**
+
+Detects transactions with mixed inputs (both your addresses and external addresses) and outputs to your wallet — the hallmark of a PayJoin (BIP-78) or P2EP transaction. PayJoin breaks the CIOH assumption.
+
+- **Triggered by:** transactions where both wallet-owned and external addresses appear as inputs, and at least one output returns to the wallet
+- **Severity:** LOW — PayJoin is a **privacy improvement**; this is informational, not a vulnerability
+- **Note:** If you did not intentionally use PayJoin, an external party contributed inputs alongside yours — review carefully.
+
+---
+
+### `WHIRLPOOL_COINJOIN` — Whirlpool CoinJoin *(informational)*
+**Severity: LOW**
+
+Detects transactions matching the Whirlpool CoinJoin structure: 4+ equal-value outputs at a known Whirlpool pool denomination (100,000 / 1,000,000 / 5,000,000 / 50,000,000 sats).
+
+- **Triggered by:** transactions with 4+ equal outputs at a Whirlpool pool amount where at least one output is owned by the wallet
+- **Severity:** LOW — Whirlpool is a **privacy improvement**; this is informational
+- **Note:** Post-mix spending behavior determines whether the privacy gain is preserved. Avoid merging post-mix UTXOs with pre-mix coins.
+
+---
+
+### `FEE_FINGERPRINTING` — Round Fee Rate
+**Severity: LOW**
+
+Transactions using exact round fee rates (1, 2, 5, 10, 15, 20, 25, 50, 100 sat/vB) are a fingerprint of certain wallet software that uses fixed or rounded fee strategies.
+
+- **Triggered by:** calculated fee rate (fee / vsize) matching any value in the round set
+- **Fix:** Use wallets with dynamic fee calculation that produces non-round sat/vB values.
+
+---
+
+### `BATCH_PAYMENT_FINGERPRINT` — Batch Payment Pattern
+**Severity: LOW**
+
+Transactions with 5+ external outputs are characteristic of exchange or custodial batch withdrawals. If your wallet sent such a transaction, it reveals your role in the transaction graph.
+
+- **Triggered by:** 5+ external (non-wallet) outputs in a transaction involving wallet inputs
+- **Fix:** If you are not a payment processor, avoid sending to many recipients in a single transaction.
+
+---
+
+### `TINY_CHANGE_OUTPUT` — Tiny Change Output
+**Severity: MEDIUM**
+
+When the change output is less than 1% of the largest payment output and below 10,000 sats, it is trivially identifiable as change — breaking the ambiguity that normally protects change detection.
+
+- **Triggered by:** change output < 1% of the largest external output AND < 10,000 sats
+- **Fix:** Use wallets with change output optimization. Select UTXOs that minimize leftover change, or use PayJoin to eliminate the change output entirely.
+
+---
+
 ## Quick start (hosted)
 
-No installation required. The easiest way to use Stealth:
+No installation required:
 
 1. Open **[stealth.vercel.app](https://stealth-bitcoin.vercel.app)**
 2. Paste your wallet descriptor into the input field
 3. Select **Receive /0**, **Change /1**, or **Both** branches
 4. Choose **Manual** (60 addresses) or **Auto gap-limit** scan mode
 5. Click **Analyze Wallet**
-6. Review the findings report; click any finding to expand details
+6. Review the findings report; click any finding to expand details and TXID links
 7. Download a PDF report with the **Export PDF** button
 
 > ⚠️ **Privacy note:** On the hosted version your descriptor is sent to the Vercel API server for analysis. It is **never stored or logged**, but it does leave your device. For maximum privacy, [run locally](#running-locally) with an optional [Tor proxy](#tor--proxy).
@@ -143,7 +264,7 @@ No installation required. The easiest way to use Stealth:
 
 ## Running locally
 
-Running locally means your descriptor and derived addresses **never leave your machine** — only individual Bitcoin addresses are queried against the public API.
+Running locally means your descriptor and derived addresses **never leave your machine** — only individual Bitcoin addresses are queried against the public blockchain API.
 
 ### Prerequisites
 
@@ -153,7 +274,7 @@ Running locally means your descriptor and derived addresses **never leave your m
 | Node.js | ≥ 18 | React frontend |
 | pip | – | Python package manager |
 
-### 1. Clone the repository
+### 1. Clone
 
 ```bash
 git clone https://github.com/i2dor/stealth.git
@@ -175,7 +296,7 @@ pip install requests[socks]
 uvicorn api.scan:app --host 127.0.0.1 --port 8000
 ```
 
-The API will be available at `http://localhost:8000`.
+The API is available at `http://localhost:8000`.
 
 ### 4. Start the frontend
 
@@ -187,13 +308,9 @@ npm run dev
 
 Open `http://localhost:5173` in your browser.
 
-### 5. Connect the frontend to your local backend
+### 5. Connect frontend to local backend
 
-In the app: **Settings → API & Backend → Backend API base URL** → set to:
-
-```
-http://localhost:8000
-```
+**Settings → API & Backend → Backend API base URL** → set to `http://localhost:8000`
 
 Leave empty to use the hosted Vercel API.
 
@@ -201,43 +318,25 @@ Leave empty to use the hosted Vercel API.
 
 ## Tor / Proxy
 
-Routing blockchain API requests through Tor hides your IP address from Blockstream and Mempool. This is the **recommended privacy configuration** — your descriptor stays local, and address lookups are anonymized.
+Routing blockchain API requests through Tor hides your IP from Blockstream and Mempool. This is the **recommended privacy configuration** — your descriptor stays local, and address lookups are anonymized.
 
-> ⚠️ The Tor proxy setting is only available when running the **local backend**. The hosted Vercel version cannot reach a local SOCKS5 socket.
-
-### Requirements
-
-- Tor daemon running locally (Tor Browser or system `tor` package)
-- Local backend running (`uvicorn api.scan:app ...`)
-- PySocks: `pip install requests[socks]`
+> ⚠️ The Tor proxy setting only works with the **local backend**. The hosted Vercel version cannot reach a local SOCKS5 socket.
 
 ### Setup
 
-1. **Start Tor:**
-   - Tor Browser: launch and keep open (default: `127.0.0.1:9150`)
-   - System daemon: `sudo systemctl start tor` (default: `127.0.0.1:9050`)
+1. **Start Tor:** Tor Browser (listens on `127.0.0.1:9150`) or system daemon (`sudo systemctl start tor` → `127.0.0.1:9050`)
+2. Start Stealth backend locally
+3. **Settings → Tor / Proxy** → enter proxy URL:
 
-2. In Stealth UI: **Settings → Tor / Proxy** → enter proxy URL:
+| Setup | Proxy URL |
+|---|---|
+| Tor Browser | `socks5h://127.0.0.1:9150` |
+| System Tor | `socks5h://127.0.0.1:9050` |
+| Custom SOCKS5 | `socks5h://<host>:<port>` |
 
-   | Setup | Proxy URL |
-   |---|---|
-   | Tor Browser | `socks5h://127.0.0.1:9150` |
-   | System Tor | `socks5h://127.0.0.1:9050` |
-   | Custom SOCKS5 | `socks5h://<host>:<port>` |
+> Use `socks5h://` (not `socks5://`) so DNS resolution also goes through Tor.
 
-   > Use `socks5h://` (not `socks5://`) so that DNS resolution also goes through Tor, preventing hostname leaks.
-
-3. Save settings and run a scan normally.
-
-### Verify it's working
-
-After a scan, check the `scan_meta.proxy` field in the API response — it should show your proxy URL:
-
-```json
-"scan_meta": {
-  "proxy": "socks5h://127.0.0.1:9050"
-}
-```
+4. Save settings and scan normally. Verify: after a scan, `scan_meta.proxy` in the API response should show your proxy URL.
 
 ---
 
@@ -266,7 +365,7 @@ Recommended for most users: **Local backend + Tor**.
 | SOCKS5 proxy URL | *(empty)* | `socks5h://127.0.0.1:9050` for Tor |
 | Request delay (ms) | `300` | Delay between API requests (rate limiting protection) |
 | Batch size | `60` | Addresses derived per scan batch |
-| Gap limit | `20` | Consecutive empty addresses before stopping (BIP44 standard) |
+| Gap limit | `20` | Consecutive empty addresses before stopping (BIP44) |
 
 ---
 
@@ -276,7 +375,7 @@ Recommended for most users: **Local backend + Tor**.
 stealth/
 ├── api/
 │   ├── scan.py             # Vercel serverless handler (GET /api/scan)
-│   └── detect_public.py    # Core analysis engine + all eight detectors
+│   └── detect_public.py    # Core analysis engine + all detectors
 ├── frontend/
 │   └── src/
 │       ├── screens/
@@ -285,7 +384,7 @@ stealth/
 │       │   ├── ReportScreen.jsx     # Findings report, export PDF
 │       │   └── SettingsScreen.jsx   # API, proxy, scan configuration
 │       ├── components/
-│       │   ├── FindingCard.jsx      # Expandable finding with details + TXID links
+│       │   ├── FindingCard.jsx      # Expandable finding with TXID links
 │       │   └── VulnerabilityBadge.jsx  # Severity badge (CRITICAL/HIGH/MEDIUM/LOW/INFO)
 │       └── services/
 │           └── walletService.js     # API client (fetch + pagination)
@@ -297,35 +396,47 @@ stealth/
 
 ## API response format
 
-The `/api/scan` endpoint returns a JSON object with the following top-level structure:
-
 ```json
 {
   "findings": [
     {
       "type": "CIOH",
       "severity": "HIGH",
-      "description": "Co-spent inputs link 3 of your addresses in tx abc123...",
+      "description": "TX abc123... merges 3/3 of your inputs (100% ownership).",
       "details": {
         "txid": "abc123...",
-        "our_addresses": [...]
+        "our_inputs": 3,
+        "total_inputs": 3,
+        "our_input_addresses": ["bc1q..."]
       },
-      "correction": "Avoid merging UTXOs from different addresses in a single transaction..."
+      "correction": "Use coin control to avoid merging multiple UTXOs..."
     }
   ],
   "warnings": [],
   "summary": {
-    "addresses_scanned": 60,
+    "findings": 1,
+    "warnings": 0,
+    "clean": false
+  },
+  "stats": {
     "transactions_analyzed": 56,
-    "findings_count": 1,
+    "addresses_derived": 60,
+    "utxos_found": 4,
     "active_addresses": 12
   },
   "scan_meta": {
-    "descriptor": "wpkh([...]xpub.../0/*)",
+    "mode": "manual",
+    "branch_mode": "receive",
+    "api_base": "https://blockstream.info/api",
+    "request_delay_ms": 250,
+    "proxy": null
+  },
+  "scan_window": {
     "offset": 0,
     "count": 60,
-    "proxy": null,
-    "api_base": "https://blockstream.info/api"
+    "from_index": 0,
+    "to_index": 59,
+    "branch": 0
   }
 }
 ```
@@ -334,9 +445,9 @@ The `/api/scan` endpoint returns a JSON object with the following top-level stru
 
 ## Privacy notice
 
-Stealth does **not** store, log, or transmit your wallet descriptor beyond the ephemeral API call used to run the analysis. All analysis is **read-only** — no transactions are broadcast, no wallet state is modified, and the descriptor is not written to any disk, database, or log on Vercel infrastructure.
+Stealth does **not** store, log, or transmit your wallet descriptor beyond the ephemeral API call used to run the analysis. All analysis is **read-only** — no transactions are broadcast, no wallet state is modified, and the descriptor is not written to any disk, database, or log.
 
-Querying Blockstream or Mempool.space for your Bitcoin addresses does reveal those addresses to those services, along with your IP address — unless you use the [Tor setup](#tor--proxy) described above.
+Querying Blockstream or Mempool.space reveals those Bitcoin addresses to those services, along with your IP address — unless you use the [Tor setup](#tor--proxy).
 
 ---
 
@@ -344,4 +455,4 @@ Querying Blockstream or Mempool.space for your Bitcoin addresses does reveal tho
 
 MIT License. See [LICENSE](./LICENSE).
 
-Forked from [stealth-bitcoin/stealth](https://github.com/stealth-bitcoin/stealth). Original copyright (c) 2026 Stealth Contributors. Modifications copyright (c) 2026 i2dor.
+Forked from [stealth-bitcoin/stealth](https://github.com/stealth-bitcoin/stealth). Original copyright © 2026 Stealth Contributors. Modifications © 2026 i2dor.
