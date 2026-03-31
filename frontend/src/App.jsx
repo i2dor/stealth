@@ -4,19 +4,24 @@ import LoadingScreen from './screens/LoadingScreen'
 import ReportScreen from './screens/ReportScreen'
 import { analyzeWallet } from './services/walletService'
 
-const SCAN_BATCH_SIZE = 20
+const SCAN_BATCH_SIZE = 60
 
 function dedupeByKey(items = [], getKey) {
   const map = new Map()
-
   for (const item of items) {
     const key = getKey(item)
     if (!map.has(key)) {
       map.set(key, item)
     }
   }
-
   return Array.from(map.values())
+}
+
+function findingKey(item) {
+  // For CIOH the txid lives in details.txid, not top-level
+  const txid = item.txid || item.details?.txid || ''
+  const address = item.address || item.details?.address || ''
+  return item.id || `${item.type || 'finding'}::${address}::${txid}::${item.description || ''}`
 }
 
 function mergeAggregateReports(prevAggregate, newReport) {
@@ -27,19 +32,8 @@ function mergeAggregateReports(prevAggregate, newReport) {
   const newFindings = newReport?.findings || []
   const newWarnings = newReport?.warnings || []
 
-  const findings = dedupeByKey(
-    [...prevFindings, ...newFindings],
-    (item) =>
-      item.id ||
-      `${item.type || 'finding'}::${item.address || ''}::${item.txid || ''}::${item.message || ''}`
-  )
-
-  const warnings = dedupeByKey(
-    [...prevWarnings, ...newWarnings],
-    (item) =>
-      item.id ||
-      `${item.type || 'warning'}::${item.address || ''}::${item.txid || ''}::${item.message || ''}`
-  )
+  const findings = dedupeByKey([...prevFindings, ...newFindings], findingKey)
+  const warnings = dedupeByKey([...prevWarnings, ...newWarnings], findingKey)
 
   const prevTxs = prevAggregate?.stats?.transactions_analyzed || 0
   const newTxs = newReport?.stats?.transactions_analyzed || 0
@@ -94,11 +88,9 @@ export default function App() {
     if (cachedReport) {
       setCurrentReport(cachedReport)
       setOffset(nextOffset)
-
       const hasIssues =
         (aggregateReport?.findings?.length || 0) > 0 ||
         (aggregateReport?.warnings?.length || 0) > 0
-
       setSuccess(hasIssues ? '' : 'Wallet analysis completed successfully.')
       setScreen('report')
       return
@@ -109,7 +101,7 @@ export default function App() {
     try {
       const result = await analyzeWallet(desc, nextOffset, SCAN_BATCH_SIZE)
 
-      console.log('Scanning offset:', nextOffset)
+      console.log('Scanning offset:', nextOffset, 'batch:', SCAN_BATCH_SIZE)
       console.log('API result:', result)
       console.log('findings:', result?.findings)
       console.log('warnings:', result?.warnings)
@@ -122,10 +114,7 @@ export default function App() {
         computedAggregate = mergeAggregateReports(aggregateReport, result)
       }
 
-      setReportCache((prev) => ({
-        ...prev,
-        [cacheKey]: result,
-      }))
+      setReportCache((prev) => ({ ...prev, [cacheKey]: result }))
       setCurrentReport(result)
       setAggregateReport(computedAggregate)
       setOffset(nextOffset)
@@ -161,14 +150,12 @@ export default function App() {
   async function handleScanPrevious() {
     const previousOffset = Math.max(0, offset - SCAN_BATCH_SIZE)
     const cacheKey = `${descriptor}::${previousOffset}`
-
     if (reportCache[cacheKey]) {
       setCurrentReport(reportCache[cacheKey])
       setOffset(previousOffset)
       setScreen('report')
       return
     }
-
     await loadBatch(descriptor, previousOffset, { extendAggregate: false })
   }
 
