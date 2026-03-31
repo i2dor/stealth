@@ -2,12 +2,23 @@ import { useState } from 'react'
 import styles from './FindingCard.module.css'
 import VulnerabilityBadge from './VulnerabilityBadge'
 
+const MEMPOOL_BASE = 'https://mempool.space/tx'
+
 function TxRow({ txid }) {
   if (!txid) return null
   return (
     <div className={styles.txRow}>
       <span className={styles.txLabel}>txid</span>
-      <span className={styles.txHash}>{txid.slice(0, 10)}…{txid.slice(-10)}</span>
+      <a
+        href={`${MEMPOOL_BASE}/${txid}`}
+        target="_blank"
+        rel="noopener noreferrer"
+        className={styles.txLink}
+        title={txid}
+      >
+        {txid.slice(0, 10)}\u2026{txid.slice(-10)}
+        <span className={styles.txExtIcon}>↗</span>
+      </a>
     </div>
   )
 }

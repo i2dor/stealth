@@ -19,6 +19,8 @@
   align-items: center;
   justify-content: space-between;
   margin-bottom: 28px;
+  flex-wrap: wrap;
+  gap: 12px;
 }
 
 .wordmark {
@@ -30,6 +32,13 @@
 
 .wordmark span {
   color: var(--accent);
+}
+
+.navActions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 .backButton {
@@ -51,6 +60,30 @@
 .backButton:hover {
   border-color: var(--accent);
   color: var(--accent);
+}
+
+/* Export buttons */
+.exportButton {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-muted);
+  font-family: var(--font-ui);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  padding: 7px 12px;
+  cursor: pointer;
+  transition: border-color var(--transition), color var(--transition), background var(--transition);
+}
+
+.exportButton:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-dim);
 }
 
 .descriptorBox {
@@ -169,6 +202,7 @@
   flex-direction: column;
   gap: 8px;
 }
+
 .successBanner {
   margin-top: 20px;
   margin-bottom: 20px;
@@ -204,33 +238,16 @@
 
 .scanMeta {
   margin-top: 8px;
-  margin-bottom: 12px;
+  margin-bottom: 4px;
   color: var(--text-muted);
   font-size: 13px;
   letter-spacing: 0.02em;
 }
 
-.moreButton {
-  margin-bottom: 24px;
-  padding: 12px 16px;
-  background: transparent;
-  color: var(--text);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  cursor: pointer;
-  font-size: 14px;
-  font-weight: 600;
-  transition: border-color var(--transition), background var(--transition);
-}
-
-.moreButton:hover {
-  background: rgba(255, 255, 255, 0.03);
-  border-color: var(--accent);
-}
-
 .paginationRow {
   display: flex;
   gap: 12px;
+  margin-top: 16px;
   margin-bottom: 24px;
 }
 
@@ -252,6 +269,7 @@
 }
 
 .moreButton:disabled {
-  opacity: 0.4;
+  opacity: 0.35;
   cursor: not-allowed;
+  pointer-events: none;
 }

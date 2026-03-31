@@ -11,17 +11,31 @@ const MESSAGES = [
 
 export default function LoadingScreen({ descriptor }) {
   const [msgIndex, setMsgIndex] = useState(0)
+  const [elapsed, setElapsed] = useState(0)
 
   useEffect(() => {
-    const interval = setInterval(() => {
+    const msgInterval = setInterval(() => {
       setMsgIndex((i) => (i + 1) % MESSAGES.length)
     }, 1000)
-    return () => clearInterval(interval)
+    return () => clearInterval(msgInterval)
+  }, [])
+
+  useEffect(() => {
+    const timerInterval = setInterval(() => {
+      setElapsed((s) => s + 1)
+    }, 1000)
+    return () => clearInterval(timerInterval)
   }, [])
 
   const shortDescriptor = descriptor.length > 48
-    ? `${descriptor.slice(0, 48)}…`
+    ? `${descriptor.slice(0, 48)}\u2026`
     : descriptor
+
+  const formatTime = (s) => {
+    const m = Math.floor(s / 60)
+    const sec = s % 60
+    return m > 0 ? `${m}m ${sec}s` : `${sec}s`
+  }
 
   return (
     <div className={styles.root}>
@@ -39,6 +53,13 @@ export default function LoadingScreen({ descriptor }) {
           {MESSAGES[msgIndex]}<span className={styles.dots}>...</span>
         </div>
         <div className={styles.descriptor}>{shortDescriptor}</div>
+        <div className={styles.timer}>
+          <span className={styles.timerIcon}>⏱</span>
+          {formatTime(elapsed)}
+          {elapsed >= 10 && (
+            <span className={styles.timerNote}> — large wallet, please wait</span>
+          )}
+        </div>
       </div>
 
       <div className={styles.progressBar}>

@@ -4,6 +4,7 @@ import sys
 import re
 import os
 import json
+import time
 from collections import defaultdict
 
 import requests
@@ -12,6 +13,12 @@ from bip_utils import Bip32Secp256k1, P2WPKHAddrEncoder, CoinsConf
 _primary = os.environ.get("ESPLORA_API_URL", "https://blockstream.info/api").rstrip("/")
 _fallback = os.environ.get("ESPLORA_FALLBACK_URL", "https://mempool.space/api").rstrip("/")
 API_BASE = _primary
+
+# Rate limiting: delay between requests (seconds)
+REQUEST_DELAY = float(os.environ.get("REQUEST_DELAY", "0.25"))
+REQUEST_DELAY_LARGE = float(os.environ.get("REQUEST_DELAY_LARGE", "0.5"))  # used when offset > 100
+MAX_RETRIES = 3
+RETRY_BACKOFF_BASE = 2.0
 
 SLIP132_TO_BIP32 = {
     "xpub": ("0488b21e", "0488b21e"),
@@ -27,12 +34,28 @@ SLIP132_TO_BIP32 = {
 }
 
 session = requests.Session()
+session.headers.update({"User-Agent": "Stealth-Wallet-Analyzer/1.0"})
+
+# Global request counter for rate limiting
+_request_count = 0
+_scan_start_offset = 0
 
 def debug(*args):
     print(*args, file=sys.stderr)
 
 def satoshis(btc):
     return int(round(float(btc) * 100_000_000))
+
+def _rate_limit_delay():
+    """Apply a delay between API requests to avoid IP rate limiting."""
+    global _request_count
+    _request_count += 1
+    delay = REQUEST_DELAY_LARGE if _scan_start_offset > 100 else REQUEST_DELAY
+    # Every 10 requests, take a longer pause
+    if _request_count % 10 == 0:
+        time.sleep(delay * 3)
+    else:
+        time.sleep(delay)
 
 def parse_descriptor(descriptor):
     if descriptor is None:
@@ -133,14 +156,34 @@ def derive_wpkh_addresses(extpub, count, branch, start_index=0):
     return addrs
 
 def api_get(path):
-    for base in (_primary, _fallback):
-        try:
-            url = f"{base}{path}"
-            r = session.get(url, timeout=(5, 10))
-            r.raise_for_status()
-            return r.json()
-        except Exception as e:
-            debug(f"api_get failed on {base}: {e}, trying fallback...")
+    """Fetch from API with rate limiting and exponential backoff retry."""
+    _rate_limit_delay()
+    for attempt in range(MAX_RETRIES):
+        for base in (_primary, _fallback):
+            try:
+                url = f"{base}{path}"
+                r = session.get(url, timeout=(5, 15))
+                if r.status_code == 429:
+                    # Rate limited — wait longer before retrying
+                    wait = RETRY_BACKOFF_BASE ** (attempt + 2)
+                    debug(f"Rate limited by {base}, waiting {wait:.1f}s before retry...")
+                    time.sleep(wait)
+                    continue
+                r.raise_for_status()
+                return r.json()
+            except requests.exceptions.HTTPError as e:
+                if e.response is not None and e.response.status_code == 429:
+                    wait = RETRY_BACKOFF_BASE ** (attempt + 2)
+                    debug(f"Rate limited (HTTPError) on {base}, waiting {wait:.1f}s...")
+                    time.sleep(wait)
+                    continue
+                debug(f"api_get HTTPError on {base}: {e}, trying fallback...")
+            except Exception as e:
+                debug(f"api_get failed on {base}: {e}, trying fallback...")
+        if attempt < MAX_RETRIES - 1:
+            wait = RETRY_BACKOFF_BASE ** attempt
+            debug(f"All endpoints failed (attempt {attempt+1}/{MAX_RETRIES}), retrying in {wait:.1f}s...")
+            time.sleep(wait)
     raise RuntimeError(f"All API endpoints failed for path: {path}")
 
 def address_stats(address):
@@ -355,6 +398,9 @@ def build_addr_map(addresses, branch, start_index=0):
 
 
 def scan_branch(parsed, offset, count, branch):
+    global _scan_start_offset
+    _scan_start_offset = offset
+
     addresses = derive_wpkh_addresses(parsed["extpub"], count, branch, start_index=offset)
     addr_map = build_addr_map(addresses, branch, start_index=offset)
     tx_map, addr_txs, utxos, active_addresses = collect_wallet_data(addresses)
@@ -391,6 +437,9 @@ def scan_branch(parsed, offset, count, branch):
 
 
 def run_scan(descriptor: str, offset: int = 0, count: int = 20) -> dict:
+    global _request_count
+    _request_count = 0  # reset counter for each scan job
+
     if offset < 0:
         raise ValueError("offset must be >= 0")
     if count <= 0 or count > 500:
@@ -446,6 +495,7 @@ def run_scan(descriptor: str, offset: int = 0, count: int = 20) -> dict:
         "requested_branch": primary_branch,
         "returned_branch": final_report["scan_window"]["branch"],
         "api_base": API_BASE,
+        "request_delay_ms": int(REQUEST_DELAY * 1000),
     }
 
     return final_report

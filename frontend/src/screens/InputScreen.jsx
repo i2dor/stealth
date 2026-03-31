@@ -5,6 +5,10 @@ const PLACEHOLDER = `wpkh([a1b2c3d4/84h/0h/0h]xpub6CatWdiZynkCminahu8Gmr7FAVnQXB
 
 export default function InputScreen({ onAnalyze, error, success }) {
   const [descriptor, setDescriptor] = useState('')
+  const isHttps = typeof window !== 'undefined' && window.location.protocol === 'https:'
+  const isLocalhost = typeof window !== 'undefined' &&
+    (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')
+  const showHttpsWarning = !isHttps && !isLocalhost
 
   function handleSubmit(e) {
     e.preventDefault()
@@ -22,6 +26,15 @@ export default function InputScreen({ onAnalyze, error, success }) {
           </div>
           <div className={styles.tagline}>Bitcoin Wallet Privacy Analyzer</div>
         </div>
+
+        {showHttpsWarning && (
+          <div className={styles.httpsWarning}>
+            <span className={styles.warnIcon}>⚠</span>
+            <span>
+              <strong>Insecure connection detected.</strong> Use HTTPS to protect your descriptor from interception.
+            </span>
+          </div>
+        )}
 
         <form className={styles.card} onSubmit={handleSubmit}>
           <label className={styles.label} htmlFor="descriptor">
@@ -54,6 +67,14 @@ export default function InputScreen({ onAnalyze, error, success }) {
             Supports <code>wpkh()</code>, <code>pkh()</code>, <code>sh(wpkh())</code> descriptors
           </p>
         </form>
+
+        <div className={styles.privacyNotice}>
+          <span className={styles.shieldIcon}>🔒</span>
+          <span>
+            Your descriptor is sent only to the analysis API and is <strong>never stored or logged</strong>.
+            All processing happens server-side in an ephemeral context.
+          </span>
+        </div>
       </div>
     </div>
   )

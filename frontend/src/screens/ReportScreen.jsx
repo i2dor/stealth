@@ -3,7 +3,68 @@ import styles from './ReportScreen.module.css'
 
 function truncateDescriptor(desc) {
   if (!desc || desc.length <= 80) return desc
-  return `${desc.slice(0, 80)}…`
+  return `${desc.slice(0, 80)}\u2026`
+}
+
+function exportJSON(aggregateReport, descriptor) {
+  const payload = {
+    exported_at: new Date().toISOString(),
+    descriptor_hint: descriptor ? `${descriptor.slice(0, 20)}...` : 'n/a',
+    ...aggregateReport,
+  }
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `stealth-report-${Date.now()}.json`
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
+function exportPDF(aggregateReport, descriptor) {
+  const stats = aggregateReport?.stats || {}
+  const findings = aggregateReport?.findings || []
+  const warnings = aggregateReport?.warnings || []
+  const window_ = aggregateReport?.aggregate_scan_window || {}
+
+  const lines = []
+  lines.push('STEALTH — Bitcoin Wallet Privacy Report')
+  lines.push('=' .repeat(60))
+  lines.push(`Generated: ${new Date().toLocaleString()}`)
+  lines.push(`Descriptor: ${descriptor ? descriptor.slice(0, 60) + '...' : 'n/a'}`)
+  lines.push(`Addresses scanned: ${window_.from_index ?? 0} – ${window_.to_index ?? 0}`)
+  lines.push(`Transactions analyzed: ${stats.transactions_analyzed || 0}`)
+  lines.push('')
+  lines.push(`SUMMARY: ${findings.length} finding(s), ${warnings.length} warning(s)`)
+  lines.push('')
+
+  if (findings.length > 0) {
+    lines.push('FINDINGS')
+    lines.push('-'.repeat(40))
+    findings.forEach((f, i) => {
+      lines.push(`${i + 1}. [${f.severity}] ${f.type} — ${f.description}`)
+      if (f.correction) lines.push(`   Fix: ${f.correction}`)
+    })
+    lines.push('')
+  }
+
+  if (warnings.length > 0) {
+    lines.push('WARNINGS')
+    lines.push('-'.repeat(40))
+    warnings.forEach((w, i) => {
+      lines.push(`${i + 1}. [${w.severity}] ${w.type} — ${w.description}`)
+    })
+    lines.push('')
+  }
+
+  const content = lines.join('\n')
+  const blob = new Blob([content], { type: 'text/plain;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `stealth-report-${Date.now()}.txt`
+  a.click()
+  URL.revokeObjectURL(url)
 }
 
 export default function ReportScreen({
@@ -38,9 +99,25 @@ export default function ReportScreen({
             <div className={styles.wordmark}>
               STEAL<span>TH</span>
             </div>
-            <button className={styles.backButton} onClick={onReset}>
-              ← Analyze Another Wallet
-            </button>
+            <div className={styles.navActions}>
+              <button
+                className={styles.exportButton}
+                onClick={() => exportJSON(aggregate, descriptor)}
+                title="Export JSON report"
+              >
+                ↓ JSON
+              </button>
+              <button
+                className={styles.exportButton}
+                onClick={() => exportPDF(aggregate, descriptor)}
+                title="Export text report"
+              >
+                ↓ TXT
+              </button>
+              <button className={styles.backButton} onClick={onReset}>
+                ← Analyze Another
+              </button>
+            </div>
           </div>
 
           <div className={styles.descriptorBox}>
@@ -59,11 +136,11 @@ export default function ReportScreen({
         )}
 
         <div className={styles.scanMeta}>
-          Current batch: {fromIndex}–{toIndex}
+          Current batch: addresses {fromIndex}–{toIndex}
         </div>
 
         <div className={styles.scanMeta}>
-          Total scanned so far: {totalFrom}–{totalTo}
+          All addresses scanned: {totalFrom}–{totalTo}
         </div>
 
         <div className={styles.paginationRow}>
@@ -72,14 +149,14 @@ export default function ReportScreen({
             onClick={onScanPrevious}
             disabled={isFirstBatch}
           >
-            Previous 100
+            ← Previous batch
           </button>
 
           <button
             className={styles.moreButton}
             onClick={onScanNext}
           >
-            Scan next 100
+            Next batch →
           </button>
         </div>
 
