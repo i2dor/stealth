@@ -23,6 +23,9 @@
       "dest": "/frontend/dist/assets/$1"
     },
     {
+      "handle": "filesystem"
+    },
+    {
       "src": "/(.*)",
       "dest": "/frontend/dist/index.html"
     }
