@@ -5,7 +5,7 @@ import sys
 import os
 
 sys.path.insert(0, os.path.dirname(__file__))
-from detect_public import run_scan, run_auto_scan
+from detect_public import run_scan, run_auto_scan, configure_proxy
 
 class handler(BaseHTTPRequestHandler):
 
@@ -34,6 +34,9 @@ class handler(BaseHTTPRequestHandler):
             branch_mode = "receive"
 
         auto = params.get("auto", ["0"])[0] in ("1", "true", "yes")
+
+        tor_proxy = params.get("tor_proxy", [""])[0].strip()
+        configure_proxy(tor_proxy if tor_proxy else None)
 
         try:
             if auto:
