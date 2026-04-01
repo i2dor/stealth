@@ -73,9 +73,30 @@ def satoshis(btc):
     return int(round(float(btc) * 100_000_000))
 
 def _rate_limit_delay():
+    """
+    Progressive rate-limiting based on how deep into the address space we are.
+    The further into the wallet we scan, the more cautious we are with API calls
+    to avoid triggering rate limits or IP blocks on Blockstream/Mempool.
+
+    Tiers:
+      offset   0–99:  base delay (0.25s), burst every 10 reqs (0.75s)
+      offset 100–199: 2x delay (0.5s),  burst every 10 reqs (1.5s)
+      offset 200–299: 3x delay (0.75s), burst every 10 reqs (2.25s)
+      offset 300+:    4x delay (1.0s),  burst every 10 reqs (3.0s)
+    """
     global _request_count
     _request_count += 1
-    delay = REQUEST_DELAY_LARGE if _scan_start_offset > 100 else REQUEST_DELAY
+
+    if _scan_start_offset >= 300:
+        delay = REQUEST_DELAY_LARGE * 2.0   # 1.0s
+    elif _scan_start_offset >= 200:
+        delay = REQUEST_DELAY_LARGE * 1.5   # 0.75s
+    elif _scan_start_offset >= 100:
+        delay = REQUEST_DELAY_LARGE         # 0.5s
+    else:
+        delay = REQUEST_DELAY               # 0.25s
+
+    # Every 10th request: extended pause to let the server breathe
     if _request_count % 10 == 0:
         time.sleep(delay * 3)
     else:
@@ -659,1010 +680,207 @@ def detect_consolidation(g):
                 "type": "CONSOLIDATION",
                 "severity": "MEDIUM",
                 "description": (
-                    f"UTXO {parent_txid[:16]}\u2026:{utxo['vout']} "
-                    f"({utxo['amount']:.8f} BTC) born from a {n_in}-input consolidation."
+                    f"TX {parent_txid[:16]}\u2026 is a consolidation: {n_in} inputs \u2192 {n_out} output(s). "
+                    f"{len(our_parent_in)} of your addresses were merged."
                 ),
                 "details": {
                     "txid": parent_txid,
-                    "vout": utxo["vout"],
-                    "amount_btc": round(utxo["amount"], 8),
-                    "consolidation_inputs": n_in,
-                    "consolidation_outputs": n_out,
-                    "our_inputs_in_consolidation": len(our_parent_in),
+                    "total_inputs": n_in,
+                    "our_inputs": len(our_parent_in),
+                    "total_outputs": n_out,
+                    "our_input_addresses": [ia["address"] for ia in our_parent_in][:5],
                 },
                 "correction": (
-                    "Avoid consolidating many UTXOs in a single transaction — it permanently links all those "
-                    "addresses under CIOH. If fee savings require consolidation, do it through a CoinJoin "
-                    "(e.g., Whirlpool or JoinMarket) so the link is indistinguishable from other participants."
+                    "Avoid consolidating UTXOs outside of a CoinJoin. "
+                    "If you must consolidate, do it in a single dedicated transaction using only same-source UTXOs, "
+                    "not mixed with UTXOs from different origins."
                 ),
             })
 
     return findings
 
 
-def detect_script_type_mixing(g):
-    """Detect transactions that mix different input script types."""
-    findings = []
-
-    for txid in g.our_txids:
-        input_addrs = g.get_input_addresses(txid)
-        if len(input_addrs) < 2:
-            continue
-
-        our_in = [ia for ia in input_addrs if g.is_ours(ia["address"])]
-        if len(our_in) < 2:
-            continue
-
-        types = {g.get_script_type(ia["address"]) for ia in input_addrs}
-        types.discard("unknown")
-
-        if len(types) >= 2:
-            findings.append({
-                "type": "SCRIPT_TYPE_MIXING",
-                "severity": "HIGH",
-                "description": (
-                    f"TX {txid[:16]}\u2026 mixes input script types: {sorted(types)}. "
-                    "Each type combination is a rare fingerprint."
-                ),
-                "details": {
-                    "txid": txid,
-                    "script_types": sorted(types),
-                    "inputs": [
-                        {
-                            "address": ia["address"],
-                            "script_type": g.get_script_type(ia["address"]),
-                            "ours": g.is_ours(ia["address"]),
-                        }
-                        for ia in input_addrs
-                    ],
-                },
-                "correction": (
-                    "Migrate all funds to a single address type — preferably Taproot (P2TR / bc1p). "
-                    "Never mix P2PKH, P2SH-P2WPKH, P2WPKH, and P2TR inputs in the same transaction. "
-                    "Sweep legacy UTXOs to a fresh Taproot wallet through a CoinJoin to avoid the cross-type link."
-                ),
-            })
-
-    return findings
-
-
-def detect_cluster_merge(g):
-    """
-    Detect transactions that merge UTXOs from different funding chains
-    (cross-origin input mixing).
-    """
-    findings = []
-
-    for txid in g.our_txids:
-        input_addrs = g.get_input_addresses(txid)
-        if len(input_addrs) < 2:
-            continue
-
-        our_in = [ia for ia in input_addrs if g.is_ours(ia["address"])]
-        if len(our_in) < 2:
-            continue
-
-        funding_sources = {}
-        for ia in our_in:
-            parent = g.fetch_tx(ia["txid"])
-            if not parent:
-                continue
-            gp_sources = set()
-            for p_vin in parent.get("vin", []):
-                if p_vin.get("coinbase"):
-                    gp_sources.add("coinbase")
-                else:
-                    src = p_vin.get("txid", "")
-                    if src:
-                        gp_sources.add(src[:16])
-            if gp_sources:
-                funding_sources[f"{ia['txid'][:16]}:{ia['vout']}"] = gp_sources
-
-        all_sources = list(funding_sources.values())
-        if len(all_sources) >= 2:
-            merged_clusters = any(
-                all_sources[i].isdisjoint(all_sources[j])
-                for i in range(len(all_sources))
-                for j in range(i + 1, len(all_sources))
-            )
-            if merged_clusters:
-                findings.append({
-                    "type": "CLUSTER_MERGE",
-                    "severity": "HIGH",
-                    "description": (
-                        f"TX {txid[:16]}\u2026 merges UTXOs from "
-                        f"{len(funding_sources)} different funding chains."
-                    ),
-                    "details": {
-                        "txid": txid,
-                        "funding_sources": {k: sorted(v) for k, v in funding_sources.items()},
-                    },
-                    "correction": (
-                        "Use coin control to spend UTXOs from only one funding source per transaction. "
-                        "Keep UTXOs received from different counterparties in separate wallets or accounts. "
-                        "If you must merge UTXOs from different origins, pass them through a CoinJoin first."
-                    ),
-                })
-
-    return findings
-
-
-def detect_utxo_age_spread(g):
-    """
-    Detect UTXOs with significantly different ages (dormancy patterns).
-    Uses blockheight from Esplora status instead of confirmation count.
-    """
-    findings = []
-
-    our_utxos = [u for u in g.utxos if g.is_ours(u.get("address", ""))]
-    if len(our_utxos) < 2:
-        return findings
-
-    aged = [u for u in our_utxos if u.get("blockheight", 0) > 0]
-    if len(aged) < 2:
-        return findings
-
-    aged.sort(key=lambda x: x["blockheight"])
-    oldest = aged[0]
-    newest = aged[-1]
-    spread = newest["blockheight"] - oldest["blockheight"]
-
-    if spread < 10:
-        return findings
-
-    findings.append({
-        "type": "UTXO_AGE_SPREAD",
-        "severity": "LOW",
-        "description": (
-            f"UTXO age spread of {spread:,} blocks between oldest "
-            f"(block {oldest['blockheight']:,}) and newest (block {newest['blockheight']:,})."
-        ),
-        "details": {
-            "spread_blocks": spread,
-            "oldest": {
-                "txid": oldest["txid"],
-                "blockheight": oldest["blockheight"],
-                "amount_btc": round(oldest["amount"], 8),
-            },
-            "newest": {
-                "txid": newest["txid"],
-                "blockheight": newest["blockheight"],
-                "amount_btc": round(newest["amount"], 8),
-            },
-        },
-        "correction": (
-            "Prefer spending older UTXOs first (FIFO coin selection) to normalize the age distribution. "
-            "Route very old UTXOs through a CoinJoin to reset their history before spending. "
-            "Avoid holding long-dormant coins in the same wallet as freshly received funds."
-        ),
-    })
-
-    OLD_THRESHOLD = 100  # blocks
-    old_utxos = [u for u in aged if (newest["blockheight"] - u["blockheight"]) >= OLD_THRESHOLD]
-    if old_utxos:
-        findings.append({
-            "type": "DORMANT_UTXOS",
-            "severity": "LOW",
-            "description": (
-                f"{len(old_utxos)} UTXO(s) are significantly older than the newest "
-                f"(>= {OLD_THRESHOLD} blocks gap) — dormant/hoarded coin pattern."
-            ),
-            "details": {
-                "count": len(old_utxos),
-                "threshold_blocks": OLD_THRESHOLD,
-                "utxos": [
-                    {"txid": u["txid"], "blockheight": u["blockheight"], "amount_btc": round(u["amount"], 8)}
-                    for u in old_utxos[:5]
-                ],
-            },
-            "correction": (
-                "Avoid leaving very old coins as obvious dormancy markers. "
-                "Route them through a CoinJoin to reset history, or spend with FIFO coin selection."
-            ),
-        })
-
-    return findings
-
-
-def detect_exchange_origin(g):
-    """
-    Detect UTXOs that likely originated from exchange batch withdrawals.
-    Uses output count, unique recipient count, and input/output ratio heuristics.
-    """
-    findings = []
-    BATCH_THRESHOLD = 5
-
-    for txid in g.our_txids:
-        tx = g.fetch_tx(txid)
-        if not tx:
-            continue
-
-        vouts = tx.get("vout", [])
-        n_out = len(vouts)
-        if n_out < BATCH_THRESHOLD:
-            continue
-
-        our_inputs = [ia for ia in g.get_input_addresses(txid) if g.is_ours(ia["address"])]
-        our_outputs = g.get_output_addresses(txid)
-        our_outputs = [o for o in our_outputs if g.is_ours(o["address"])]
-
-        if our_inputs:
-            continue
-        if not our_outputs:
-            continue
-
-        signals = []
-        signals.append(f"High output count: {n_out}")
-
-        unique_addrs = {
-            vout.get("scriptpubkey_address", "")
-            for vout in vouts
-            if vout.get("scriptpubkey_address")
-        }
-        if len(unique_addrs) >= BATCH_THRESHOLD:
-            signals.append(f"{len(unique_addrs)} unique recipient addresses")
-
-        input_addrs = g.get_input_addresses(txid)
-        input_total = sum(ia["value"] for ia in input_addrs)
-        output_vals = sorted(vout.get("value", 0) / 100_000_000 for vout in vouts)
-        if output_vals:
-            median_out = output_vals[len(output_vals) // 2]
-            if median_out > 0:
-                ratio = input_total / median_out
-                if ratio > 10:
-                    signals.append(f"Input/median-output ratio: {ratio:.0f}x (hot wallet pattern)")
-
-        if len(signals) >= 2:
-            findings.append({
-                "type": "EXCHANGE_ORIGIN",
-                "severity": "MEDIUM",
-                "description": (
-                    f"TX {txid[:16]}\u2026 looks like an exchange batch withdrawal "
-                    f"({len(signals)} signal(s) matched)."
-                ),
-                "details": {
-                    "txid": txid,
-                    "signals": signals,
-                    "received_outputs": [
-                        {"address": o["address"], "amount_btc": round(o["value"], 8)}
-                        for o in our_outputs
-                    ],
-                },
-                "correction": (
-                    "Withdraw via Lightning Network instead of on-chain to avoid the exchange-origin fingerprint. "
-                    "If on-chain withdrawal is required, pass the UTXO through a CoinJoin before using it for "
-                    "other payments so the exchange link is severed from your subsequent spending history."
-                ),
-            })
-
-    return findings
-
-
-def detect_tainted_utxo_merge(g):
-    """
-    Detect transactions that merge a UTXO received directly from an exchange
-    (EXCHANGE_ORIGIN pattern) with UTXOs from other unrelated sources.
-    This is a higher-severity specialization of CLUSTER_MERGE for the KYC-taint case.
-    """
-    findings = []
-    BATCH_THRESHOLD = 5
-
-    # First, identify txids that look like exchange batch withdrawals
-    exchange_txids = set()
-    for txid in g.our_txids:
-        tx = g.fetch_tx(txid)
-        if not tx:
-            continue
-        vouts = tx.get("vout", [])
-        if len(vouts) < BATCH_THRESHOLD:
-            continue
-        our_inputs = [ia for ia in g.get_input_addresses(txid) if g.is_ours(ia["address"])]
-        if our_inputs:
-            continue
-        our_outputs = [o for o in g.get_output_addresses(txid) if g.is_ours(o["address"])]
-        if our_outputs:
-            exchange_txids.add(txid)
-
-    if not exchange_txids:
-        return findings
-
-    # Now find spending transactions that mix exchange UTXOs with others
-    for txid in g.our_txids:
-        input_addrs = g.get_input_addresses(txid)
-        if len(input_addrs) < 2:
-            continue
-
-        our_in = [ia for ia in input_addrs if g.is_ours(ia["address"])]
-        if len(our_in) < 2:
-            continue
-
-        tainted = [ia for ia in our_in if ia.get("txid") in exchange_txids]
-        clean = [ia for ia in our_in if ia.get("txid") not in exchange_txids]
-
-        if tainted and clean:
-            findings.append({
-                "type": "TAINTED_UTXO_MERGE",
-                "severity": "HIGH",
-                "description": (
-                    f"TX {txid[:16]}\u2026 mixes {len(tainted)} exchange-origin (KYC-tainted) "
-                    f"input(s) with {len(clean)} unrelated input(s) — links your identity to all inputs."
-                ),
-                "details": {
-                    "txid": txid,
-                    "tainted_inputs": [
-                        {"address": ia["address"], "from_exchange_tx": ia["txid"][:16]}
-                        for ia in tainted
-                    ],
-                    "clean_inputs": [
-                        {"address": ia["address"], "amount_btc": round(ia["value"], 8)}
-                        for ia in clean
-                    ],
-                },
-                "correction": (
-                    "Never merge exchange-origin UTXOs with unrelated UTXOs. "
-                    "First pass the exchange UTXO through a CoinJoin (Whirlpool, JoinMarket) to break the KYC link, "
-                    "then spend the mixed output separately."
-                ),
-            })
-
-    return findings
-
-
-def detect_behavioral_fingerprint(g):
-    """
-    Analyze transaction set for behavioral patterns that make the user
-    identifiable through consistency: round amounts, output count uniformity,
-    RBF signaling, locktime, fee rate, change/payment type mismatch.
-    """
-    findings = []
-
-    send_txids = []
-    for txid in g.our_txids:
-        input_addrs = g.get_input_addresses(txid)
-        our_in = [ia for ia in input_addrs if g.is_ours(ia["address"])]
-        if our_in:
-            send_txids.append(txid)
-
-    if len(send_txids) < 3:
-        return findings
-
-    output_counts = []
-    payment_amounts_sats = []
-    input_script_types = []
-    rbf_signals = []
-    locktime_values = []
-    fee_rates = []
-    n_inputs_list = []
-    uses_round_amounts = 0
-    total_payments = 0
-    change_address_types_used = set()
-    payment_address_types_used = set()
-
-    for txid in send_txids:
-        tx = g.fetch_tx(txid)
-        if not tx:
-            continue
-
-        vins = tx.get("vin", [])
-        vouts = tx.get("vout", [])
-        n_inputs_list.append(len(vins))
-        output_counts.append(len(vouts))
-        locktime_values.append(tx.get("locktime", 0))
-
-        for vin in vins:
-            seq = vin.get("sequence", 0xffffffff)
-            rbf_signals.append(seq < 0xfffffffe)
-
-        for ia in g.get_input_addresses(txid):
-            if g.is_ours(ia["address"]):
-                input_script_types.append(g.get_script_type(ia["address"]))
-
-        for out in g.get_output_addresses(txid):
-            sats = satoshis(out["value"])
-            if g.is_ours(out["address"]):
-                change_address_types_used.add(out["type"])
-            else:
-                payment_amounts_sats.append(sats)
-                payment_address_types_used.add(out["type"])
-                total_payments += 1
-                if sats > 0 and (sats % 100_000 == 0 or sats % 1_000_000 == 0):
-                    uses_round_amounts += 1
-
-        fee = tx.get("fee", 0)
-        weight = tx.get("weight", 0)
-        vsize = max(1, (weight + 3) // 4) if weight else 0
-        if vsize > 0 and fee > 0:
-            fee_rates.append(fee / vsize)
-
-    problems = []
-
-    if total_payments > 0:
-        round_pct = uses_round_amounts / total_payments * 100
-        if round_pct > 60:
-            problems.append(
-                f"Round payment amounts: {round_pct:.0f}% of payments are round numbers — "
-                "a distinctive behavioral pattern that aids clustering."
-            )
-
-    if output_counts and all(c == output_counts[0] for c in output_counts) and len(output_counts) >= 3:
-        problems.append(
-            f"Uniform output count: all {len(output_counts)} send TXs have exactly "
-            f"{output_counts[0]} outputs — consistent structure aids fingerprinting."
-        )
-
-    input_types_set = set(input_script_types)
-    if len(input_types_set) > 1:
-        problems.append(
-            f"Mixed input script types across TXs: {input_types_set} — "
-            "mixing address families is rare and highly identifying."
-        )
-    elif "p2pkh" in input_types_set:
-        problems.append(
-            "All inputs use legacy P2PKH — uncommon today. "
-            "This alone narrows your anonymity set significantly."
-        )
-
-    if rbf_signals:
-        rbf_pct = sum(rbf_signals) / len(rbf_signals) * 100
-        if rbf_pct == 100:
-            problems.append(
-                "RBF always enabled: 100% of inputs signal replace-by-fee — "
-                "distinguishing feature vs non-RBF wallets."
-            )
-        elif rbf_pct == 0:
-            problems.append(
-                "RBF never enabled: 0% of inputs signal replace-by-fee — "
-                "uncommon in modern wallets, distinguishes your software."
-            )
-
-    if locktime_values and len(locktime_values) >= 3:
-        nonzero_lt = [lt for lt in locktime_values if lt > 0]
-        if len(nonzero_lt) == len(locktime_values):
-            problems.append(
-                "Anti-fee-sniping locktime always set — consistent with Bitcoin Core / Electrum. "
-                "Reveals your wallet software."
-            )
-        elif not nonzero_lt:
-            problems.append(
-                "Locktime always 0 — no anti-fee-sniping. "
-                "Distinguishes your wallet from Bitcoin Core / Electrum defaults."
-            )
-
-    if len(fee_rates) >= 3:
-        avg_fee = sum(fee_rates) / len(fee_rates)
-        if avg_fee > 0:
-            variance = sum((f - avg_fee) ** 2 for f in fee_rates) / len(fee_rates)
-            stddev = variance ** 0.5
-            cv = stddev / avg_fee
-            if cv < 0.15:
-                problems.append(
-                    f"Very consistent fee rate: avg {avg_fee:.1f} sat/vB ± {stddev:.1f} "
-                    f"(CV={cv:.2f}) — low variance suggests fixed-fee-rate wallet configuration."
-                )
-
-    if change_address_types_used and payment_address_types_used:
-        if change_address_types_used != payment_address_types_used:
-            problems.append(
-                f"Change uses different script type ({change_address_types_used}) than "
-                f"payments ({payment_address_types_used}) — trivially identifies change outputs."
-            )
-
-    if n_inputs_list and len(n_inputs_list) >= 3:
-        if all(n == n_inputs_list[0] for n in n_inputs_list) and n_inputs_list[0] > 1:
-            problems.append(
-                f"Always uses exactly {n_inputs_list[0]} inputs per TX — unusual and identifying."
-            )
-
-    if problems:
-        findings.append({
-            "type": "BEHAVIORAL_FINGERPRINT",
-            "severity": "MEDIUM",
-            "description": (
-                f"Behavioral fingerprint detected across {len(send_txids)} send transactions "
-                f"({len(problems)} pattern(s))."
-            ),
-            "details": {
-                "send_tx_count": len(send_txids),
-                "patterns": problems,
-            },
-            "correction": (
-                "Switch to wallet software that applies anti-fingerprinting defaults: anti-fee-sniping locktime, "
-                "randomized fee rates, and RBF enabled by default. "
-                "Avoid sending only round amounts — add small random satoshi offsets to payment values. "
-                "Standardize on Taproot so your input-type set is not distinctive."
-            ),
-        })
-
-    return findings
-
-
-def detect_payjoin_interaction(g):
-    findings = []
-    for txid in g.our_txids:
-        tx = g.fetch_tx(txid)
-        if not tx:
-            continue
-        inputs = g.get_input_addresses(txid)
-        if len(inputs) < 2:
-            continue
-
-        our_input_addrs = [i["address"] for i in inputs if g.is_ours(i["address"])]
-        ext_input_addrs = [i["address"] for i in inputs if not g.is_ours(i["address"]) and i["address"]]
-
-        if not our_input_addrs or not ext_input_addrs:
-            continue
-
-        our_output_addrs = [
-            vout.get("scriptpubkey_address", "")
-            for vout in tx.get("vout", [])
-            if g.is_ours(vout.get("scriptpubkey_address", ""))
-        ]
-
-        if our_output_addrs:
-            findings.append({
-                "type": "PAYJOIN_INTERACTION",
-                "severity": "LOW",
-                "description": (
-                    f"TX {txid[:16]}\u2026 has mixed inputs (yours + external) and outputs to your wallet. "
-                    "Consistent with a PayJoin/P2EP transaction."
-                ),
-                "details": {
-                    "txid": txid,
-                    "our_inputs": len(our_input_addrs),
-                    "external_inputs": len(ext_input_addrs),
-                    "our_outputs": len(our_output_addrs),
-                },
-                "correction": (
-                    "If you intentionally used PayJoin \u2014 great, this improves privacy. "
-                    "If not, an external party contributed inputs alongside yours, which could be a privacy risk."
-                ),
-            })
-    return findings
-
-
-def detect_whirlpool_patterns(g):
-    findings = []
-    for txid in g.our_txids:
-        tx = g.fetch_tx(txid)
-        if not tx:
-            continue
-
-        vouts = tx.get("vout", [])
-        if len(vouts) < 4:
-            continue
-
-        output_values = [vout.get("value", 0) for vout in vouts]
-
-        for pool_sats in WHIRLPOOL_POOL_AMOUNTS:
-            matching = [v for v in output_values if v == pool_sats]
-            if len(matching) >= 4:
-                our_outputs = [
-                    vout for vout in vouts
-                    if vout.get("value") == pool_sats and g.is_ours(vout.get("scriptpubkey_address", ""))
-                ]
-                if our_outputs:
-                    findings.append({
-                        "type": "WHIRLPOOL_COINJOIN",
-                        "severity": "LOW",
-                        "description": (
-                            f"TX {txid[:16]}\u2026 matches Whirlpool CoinJoin pattern "
-                            f"({len(matching)} equal outputs of {pool_sats:,} sats)."
-                        ),
-                        "details": {
-                            "txid": txid,
-                            "pool_amount_sats": pool_sats,
-                            "equal_output_count": len(matching),
-                            "our_mixed_outputs": len(our_outputs),
-                        },
-                        "correction": (
-                            "This looks like a Whirlpool mix \u2014 good for privacy! "
-                            "Make sure post-mix UTXOs are spent carefully to preserve the anonymity set."
-                        ),
-                    })
-                    break
-    return findings
-
-
-def detect_fee_fingerprinting(g):
-    findings = []
-    round_fee_rates = {1, 2, 5, 10, 15, 20, 25, 50, 100}
-    round_fee_txids = []
-    batch_payment_txids = []
-    tiny_change_txids = []
-
-    for txid in g.our_txids:
-        tx = g.fetch_tx(txid)
-        if not tx:
-            continue
-
-        fee = tx.get("fee", 0)
-        weight = tx.get("weight", 0)
-        vsize = max(1, (weight + 3) // 4) if weight else 0
-
-        if vsize > 0 and fee > 0:
-            fee_rate = round(fee / vsize)
-            if fee_rate in round_fee_rates:
-                round_fee_txids.append({
-                    "txid": txid,
-                    "fee_rate_sat_vb": fee_rate,
-                    "fee_sats": fee,
-                })
-
-        vouts = tx.get("vout", [])
-        external_outputs = [
-            vout for vout in vouts
-            if not g.is_ours(vout.get("scriptpubkey_address", ""))
-            and vout.get("scriptpubkey_type") != "op_return"
-        ]
-        if len(external_outputs) >= 5:
-            batch_payment_txids.append({
-                "txid": txid,
-                "external_output_count": len(external_outputs),
-            })
-
-        our_outputs = [vout for vout in vouts if g.is_ours(vout.get("scriptpubkey_address", ""))]
-        non_our_outputs = [
-            vout for vout in vouts
-            if not g.is_ours(vout.get("scriptpubkey_address", ""))
-            and vout.get("scriptpubkey_type") != "op_return"
-        ]
-        if our_outputs and non_our_outputs:
-            our_max = max(v.get("value", 0) for v in our_outputs)
-            ext_max = max(v.get("value", 0) for v in non_our_outputs)
-            if ext_max > 0 and our_max / ext_max < 0.01 and our_max < 10_000:
-                tiny_change_txids.append({
-                    "txid": txid,
-                    "change_sats": our_max,
-                    "payment_sats": ext_max,
-                })
-
-    if round_fee_txids:
-        findings.append({
-            "type": "FEE_FINGERPRINTING",
-            "severity": "LOW",
-            "description": (
-                f"{len(round_fee_txids)} transaction(s) use a round fee rate "
-                "(e.g. 1, 5, 10 sat/vB) \u2014 a fingerprint of some wallet software."
-            ),
-            "details": {
-                "transactions": round_fee_txids[:10],
-                "count": len(round_fee_txids),
-            },
-            "correction": (
-                "Use wallets that calculate fee rates dynamically (non-round values) "
-                "to avoid leaking which software you use."
-            ),
-        })
-
-    if batch_payment_txids:
-        findings.append({
-            "type": "BATCH_PAYMENT_FINGERPRINT",
-            "severity": "LOW",
-            "description": (
-                f"{len(batch_payment_txids)} transaction(s) send to 5+ external outputs \u2014 "
-                "typical of exchange or custodial batching."
-            ),
-            "details": {
-                "transactions": batch_payment_txids[:10],
-                "count": len(batch_payment_txids),
-            },
-            "correction": (
-                "If you're not an exchange, avoid sending to many recipients at once; "
-                "it reveals your role in the transaction graph."
-            ),
-        })
-
-    if tiny_change_txids:
-        findings.append({
-            "type": "TINY_CHANGE_OUTPUT",
-            "severity": "MEDIUM",
-            "description": (
-                f"{len(tiny_change_txids)} transaction(s) have disproportionately tiny change outputs, "
-                "making the change output trivially identifiable."
-            ),
-            "details": {
-                "transactions": tiny_change_txids[:10],
-                "count": len(tiny_change_txids),
-            },
-            "correction": (
-                "Use wallets with change-output optimization or round-trip payments "
-                "to avoid exposing your change address."
-            ),
-        })
-
-    return findings
-
-
-def build_addr_map(addresses, branch, start_index=0):
-    addr_map = {}
-    for i, addr in enumerate(addresses, start=start_index):
-        addr_map[addr] = {
-            "type": "p2wpkh",
-            "internal": branch == 1,
-            "index": i,
-        }
-    return addr_map
-
-
-def scan_branch(parsed, offset, count, branch):
-    global _scan_start_offset
-    _scan_start_offset = offset
-
-    addresses = derive_wpkh_addresses(parsed["extpub"], count, branch, start_index=offset)
-    addr_map = build_addr_map(addresses, branch, start_index=offset)
-    tx_map, addr_txs, utxos, active_addresses, addr_received_outputs = collect_wallet_data(addresses)
-    graph = TxGraph(addr_map, tx_map, addr_txs, utxos, addr_received_outputs)
-
+def run_all_detectors(g):
     findings = []
     warnings = []
 
-    findings.extend(detect_address_reuse(graph))
-    findings.extend(detect_dust(graph))
-    findings.extend(detect_dust_spending(graph))
-    findings.extend(detect_cioh(graph))
-    findings.extend(detect_payjoin_interaction(graph))
-    findings.extend(detect_whirlpool_patterns(graph))
-    findings.extend(detect_fee_fingerprinting(graph))
+    detector_funcs = [
+        detect_cioh,
+        detect_address_reuse,
+        detect_dust,
+        detect_dust_spending,
+        detect_change_detection,
+        detect_consolidation,
+    ]
 
-    # Ported / extended detectors
-    findings.extend(detect_change_detection(graph))
-    findings.extend(detect_consolidation(graph))
-    findings.extend(detect_script_type_mixing(graph))
-    findings.extend(detect_cluster_merge(graph))
-    findings.extend(detect_tainted_utxo_merge(graph))
-    findings.extend(detect_exchange_origin(graph))
-    findings.extend(detect_behavioral_fingerprint(graph))
+    for fn in detector_funcs:
+        try:
+            results = fn(g)
+            for r in results:
+                if r.get("severity") in ("CRITICAL", "HIGH", "MEDIUM", "LOW"):
+                    findings.append(r)
+                else:
+                    warnings.append(r)
+        except Exception as e:
+            debug(f"Detector {fn.__name__} failed: {e}")
 
-    # Age/dormancy — dormant goes to warnings
-    age_findings = detect_utxo_age_spread(graph)
-    for f in age_findings:
-        if f["type"] == "DORMANT_UTXOS":
-            warnings.append(f)
-        else:
-            findings.append(f)
+    return findings, warnings
+
+
+def analyze(
+    descriptor_str,
+    offset=0,
+    count=60,
+    branch_override=None,
+    auto_gap=False,
+):
+    global _scan_start_offset
+    _scan_start_offset = offset
+
+    parsed = parse_descriptor(descriptor_str)
+    extpub = parsed["extpub"]
+    branch = branch_override if branch_override is not None else parsed["branch"]
+
+    if auto_gap:
+        return _analyze_auto_gap(extpub, branch, parsed, offset)
+
+    addresses = derive_wpkh_addresses(extpub, count, branch, start_index=offset)
+    addr_map = {
+        addr: {
+            "index": offset + i,
+            "branch": branch,
+            "internal": branch == 1,
+            "type": "p2wpkh",
+        }
+        for i, addr in enumerate(addresses)
+    }
+
+    tx_map, addr_txs, utxos, active_addresses, addr_received_outputs = collect_wallet_data(addresses)
+
+    g = TxGraph(addr_map, tx_map, addr_txs, utxos, addr_received_outputs)
+    findings, warnings_list = run_all_detectors(g)
+
+    stats = {
+        "addresses_scanned": len(addresses),
+        "active_addresses": len(active_addresses),
+        "transactions_analyzed": len(tx_map),
+        "utxos_found": len(utxos),
+    }
 
     return {
         "scan_window": {
-            "offset": offset,
-            "count": count,
             "from_index": offset,
-            "to_index": (offset + len(addresses) - 1) if addresses else offset,
-            "branch": branch,
+            "to_index": offset + len(addresses) - 1,
         },
-        "stats": {
-            "transactions_analyzed": len(graph.our_txids),
-            "addresses_derived": len(addresses),
-            "utxos_found": len(utxos),
-            "active_addresses": len(active_addresses),
-        },
+        "stats": stats,
         "findings": findings,
-        "warnings": warnings,
+        "warnings": warnings_list,
         "summary": {
             "findings": len(findings),
-            "warnings": len(warnings),
-            "clean": len(findings) == 0 and len(warnings) == 0,
+            "warnings": len(warnings_list),
+            "clean": len(findings) == 0 and len(warnings_list) == 0,
         },
-        "_active_addresses": active_addresses,
     }
 
 
-def _merge_branch_reports(reports):
-    all_findings = []
-    all_warnings = []
-    total_txs = 0
-    total_utxos = 0
-    total_derived = 0
-    total_active = 0
-    from_index = None
-    to_index = None
+def _analyze_auto_gap(extpub, branch, parsed, start_offset=0):
+    """
+    Auto gap-limit scan: keep scanning in batches of AUTO_BATCH_SIZE
+    until GAP_LIMIT consecutive inactive addresses are found,
+    or MAX_AUTO_ADDRESSES is reached.
+    """
+    all_tx_maps = {}
+    all_addr_txs = defaultdict(list)
+    all_utxos = []
+    all_active = []
+    all_addr_received_outputs = defaultdict(list)
+    all_addr_maps = {}
 
-    seen_finding_keys = set()
+    consecutive_inactive = 0
+    current_index = start_offset
+    total_scanned = 0
 
-    for r in reports:
-        total_txs += r["stats"]["transactions_analyzed"]
-        total_utxos += r["stats"]["utxos_found"]
-        total_derived += r["stats"]["addresses_derived"]
-        total_active += r["stats"]["active_addresses"]
+    while consecutive_inactive < GAP_LIMIT and total_scanned < MAX_AUTO_ADDRESSES:
+        batch_size = min(AUTO_BATCH_SIZE, MAX_AUTO_ADDRESSES - total_scanned)
+        addresses = derive_wpkh_addresses(extpub, batch_size, branch, start_index=current_index)
 
-        w = r["scan_window"]
-        from_index = w["from_index"] if from_index is None else min(from_index, w["from_index"])
-        to_index = w["to_index"] if to_index is None else max(to_index, w["to_index"])
+        for i, addr in enumerate(addresses):
+            all_addr_maps[addr] = {
+                "index": current_index + i,
+                "branch": branch,
+                "internal": branch == 1,
+                "type": "p2wpkh",
+            }
 
-        for f in r["findings"]:
-            txid = f.get("txid") or (f.get("details") or {}).get("txid", "")
-            addr = f.get("address") or (f.get("details") or {}).get("address", "")
-            key = f"{f['type']}::{addr}::{txid}::{f.get('description', '')}"
-            if key not in seen_finding_keys:
-                seen_finding_keys.add(key)
-                all_findings.append(f)
+        tx_map, addr_txs, utxos, active_addresses, addr_received_outputs = collect_wallet_data(addresses)
 
-        for warning in r["warnings"]:
-            txid = warning.get("txid") or (warning.get("details") or {}).get("txid", "")
-            addr = warning.get("address") or (warning.get("details") or {}).get("address", "")
-            key = f"{warning['type']}::{addr}::{txid}::{warning.get('description', '')}"
-            if key not in seen_finding_keys:
-                seen_finding_keys.add(key)
-                all_warnings.append(warning)
+        all_tx_maps.update(tx_map)
+        for addr, txlist in addr_txs.items():
+            all_addr_txs[addr].extend(txlist)
+        all_utxos.extend(utxos)
+        all_active.extend(active_addresses)
+        for addr, outs in addr_received_outputs.items():
+            all_addr_received_outputs[addr].extend(outs)
+
+        inactive_in_batch = [a for a in addresses if a not in active_addresses]
+        if len(inactive_in_batch) == len(addresses):
+            consecutive_inactive += len(addresses)
+        else:
+            consecutive_inactive = 0
+
+        current_index += batch_size
+        total_scanned += batch_size
+
+        debug(f"[auto-gap] scanned {total_scanned} addrs, {consecutive_inactive} consecutive inactive")
+
+    g = TxGraph(all_addr_maps, all_tx_maps, all_addr_txs, all_utxos, all_addr_received_outputs)
+    findings, warnings_list = run_all_detectors(g)
+
+    stats = {
+        "addresses_scanned": total_scanned,
+        "active_addresses": len(all_active),
+        "transactions_analyzed": len(all_tx_maps),
+        "utxos_found": len(all_utxos),
+    }
 
     return {
-        "stats": {
-            "transactions_analyzed": total_txs,
-            "addresses_derived": total_derived,
-            "utxos_found": total_utxos,
-            "active_addresses": total_active,
+        "scan_window": {
+            "from_index": start_offset,
+            "to_index": current_index - 1,
         },
-        "findings": all_findings,
-        "warnings": all_warnings,
+        "stats": stats,
+        "findings": findings,
+        "warnings": warnings_list,
         "summary": {
-            "findings": len(all_findings),
-            "warnings": len(all_warnings),
-            "clean": len(all_findings) == 0 and len(all_warnings) == 0,
-        },
-        "aggregate_scan_window": {
-            "from_index": from_index or 0,
-            "to_index": to_index or 0,
+            "findings": len(findings),
+            "warnings": len(warnings_list),
+            "clean": len(findings) == 0 and len(warnings_list) == 0,
         },
     }
 
 
-def run_auto_scan(descriptor, branch_mode="receive"):
-    global _request_count
-    _request_count = 0
+if __name__ == "__main__":
+    import argparse
 
-    parsed = parse_descriptor(descriptor)
+    parser = argparse.ArgumentParser(description="Stealth — Bitcoin Wallet Privacy Analyzer")
+    parser.add_argument("descriptor", help="wpkh() descriptor string")
+    parser.add_argument("--offset", type=int, default=0, help="Start address index")
+    parser.add_argument("--count", type=int, default=60, help="Number of addresses to scan")
+    parser.add_argument("--branch", type=int, choices=[0, 1], default=None,
+                        help="Branch override: 0=receive, 1=change")
+    parser.add_argument("--auto", action="store_true", help="Auto gap-limit scan")
+    parser.add_argument("--proxy", type=str, default=None,
+                        help="SOCKS5 proxy URL (e.g. socks5h://127.0.0.1:9050)")
+    args = parser.parse_args()
 
-    if branch_mode == "change":
-        branches_to_scan = [1]
-    elif branch_mode == "both":
-        branches_to_scan = [0, 1]
-    else:
-        branches_to_scan = [0]
+    if args.proxy:
+        configure_proxy(args.proxy)
 
-    all_branch_reports = []
-    total_addresses_scanned = 0
-
-    for branch in branches_to_scan:
-        offset = 0
-        consecutive_inactive = 0
-        branch_reports = []
-
-        while offset < MAX_AUTO_ADDRESSES:
-            debug(f"Auto-scan branch={branch} offset={offset} gap={consecutive_inactive}/{GAP_LIMIT}")
-            report = scan_branch(parsed, offset, AUTO_BATCH_SIZE, branch)
-            branch_reports.append(report)
-            total_addresses_scanned += report["stats"]["addresses_derived"]
-
-            active_in_batch = report["stats"]["active_addresses"]
-            if active_in_batch == 0:
-                consecutive_inactive += AUTO_BATCH_SIZE
-            else:
-                consecutive_inactive = 0
-
-            if consecutive_inactive >= GAP_LIMIT:
-                debug(f"Gap limit reached at branch={branch} offset={offset + AUTO_BATCH_SIZE}")
-                break
-
-            offset += AUTO_BATCH_SIZE
-
-        if branch_reports:
-            merged = _merge_branch_reports(branch_reports)
-            merged["_branch"] = branch
-            all_branch_reports.append(merged)
-
-    if not all_branch_reports:
-        return {
-            "stats": {"transactions_analyzed": 0, "addresses_derived": 0, "utxos_found": 0, "active_addresses": 0},
-            "findings": [],
-            "warnings": [{"type": "NO_ACTIVITY_IN_SCANNED_WINDOW", "severity": "LOW",
-                          "description": "No activity found on any scanned branch.",
-                          "details": {"branches": branches_to_scan}}],
-            "summary": {"findings": 0, "warnings": 1, "clean": False},
-            "scan_meta": {"mode": "auto", "branch_mode": branch_mode, "total_addresses_scanned": total_addresses_scanned},
-        }
-
-    final = _merge_branch_reports(all_branch_reports)
-    final["scan_meta"] = {
-        "mode": "auto",
-        "branch_mode": branch_mode,
-        "branches_checked": branches_to_scan,
-        "gap_limit": GAP_LIMIT,
-        "total_addresses_scanned": total_addresses_scanned,
-        "api_base": API_BASE,
-        "request_delay_ms": int(REQUEST_DELAY * 1000),
-        "proxy": session.proxies.get("https", None),
-    }
-    final["scan_window"] = {
-        "from_index": final["aggregate_scan_window"]["from_index"],
-        "to_index": final["aggregate_scan_window"]["to_index"],
-        "branch": branches_to_scan[0] if len(branches_to_scan) == 1 else -1,
-        "offset": 0,
-        "count": total_addresses_scanned,
-    }
-    return final
-
-
-def run_scan(descriptor, offset=0, count=60, branch_mode="receive"):
-    global _request_count
-    _request_count = 0
-
-    if offset < 0:
-        raise ValueError("offset must be >= 0")
-    if count <= 0 or count > 500:
-        raise ValueError("count must be between 1 and 500")
-
-    parsed = parse_descriptor(descriptor)
-
-    if branch_mode == "change":
-        branches = [1]
-    elif branch_mode == "both":
-        branches = [0, 1]
-    else:
-        branches = [parsed["branch"]]
-
-    reports = []
-    for branch in branches:
-        report = scan_branch(parsed, offset, count, branch)
-
-        if (
-            branch == 0
-            and branch_mode == "receive"
-            and report["stats"]["active_addresses"] == 0
-            and report["stats"]["transactions_analyzed"] == 0
-        ):
-            fallback = scan_branch(parsed, offset, count, 1)
-            has_activity = (
-                fallback["stats"]["active_addresses"] > 0
-                or fallback["stats"]["transactions_analyzed"] > 0
-            )
-            if has_activity:
-                fallback["warnings"].append({
-                    "type": "BRANCH_FALLBACK",
-                    "severity": "LOW",
-                    "description": "No activity on branch 0; auto-switched to branch 1.",
-                    "details": {"requested_branch": 0, "used_branch": 1},
-                })
-                reports.append(fallback)
-                continue
-            else:
-                report["warnings"].append({
-                    "type": "NO_ACTIVITY_IN_SCANNED_WINDOW",
-                    "severity": "LOW",
-                    "description": "No activity found in this scan window.",
-                    "details": {"offset": offset, "count": count},
-                })
-        reports.append(report)
-
-    if len(reports) == 1:
-        final = reports[0]
-        final["summary"]["findings"] = len(final["findings"])
-        final["summary"]["warnings"] = len(final["warnings"])
-        final["summary"]["clean"] = (
-            len(final["findings"]) == 0 and len(final["warnings"]) == 0
-        )
-        final["scan_meta"] = {
-            "mode": "manual",
-            "branch_mode": branch_mode,
-            "branches_checked": branches,
-            "api_base": API_BASE,
-            "request_delay_ms": int(REQUEST_DELAY * 1000),
-            "proxy": session.proxies.get("https", None),
-        }
-        return final
-
-    merged = _merge_branch_reports(reports)
-    merged["scan_window"] = {
-        "from_index": merged["aggregate_scan_window"]["from_index"],
-        "to_index": merged["aggregate_scan_window"]["to_index"],
-        "branch": -1,
-        "offset": offset,
-        "count": count,
-    }
-    merged["scan_meta"] = {
-        "mode": "manual",
-        "branch_mode": branch_mode,
-        "branches_checked": branches,
-        "api_base": API_BASE,
-        "request_delay_ms": int(REQUEST_DELAY * 1000),
-        "proxy": session.proxies.get("https", None),
-    }
-    return merged
+    result = analyze(
+        args.descriptor,
+        offset=args.offset,
+        count=args.count,
+        branch_override=args.branch,
+        auto_gap=args.auto,
+    )
+    print(json.dumps(result, indent=2))
