@@ -449,7 +449,7 @@ Stealth does **not** store, log, or transmit your wallet descriptor beyond the e
 
 Querying Blockstream or Mempool.space reveals those Bitcoin addresses to those services, along with your IP address — unless you use the [Tor setup](#tor--proxy).
 
----
+--- 
 
 ## License
 
