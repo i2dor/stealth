@@ -1,7 +1,12 @@
 import { useState } from 'react'
 import styles from './InputScreen.module.css'
 
-const PLACEHOLDER = `wpkh([a1b2c3d4/84h/0h/0h]xpub6CatWdiZynkCminahu8Gmr7FAVnQXBTSMaBxn6qmBNkdm9tDkFzWmjmDrLBCQSTa7BHgpEjCXzMTCyDsQLSmcGYJHBB7cTwpqLNRKGP47uw/0/*)#qwer1234`
+const PLACEHOLDER = `wpkh([a1b2c3d4/84h/0h/0h]xpub6CatWdiZynkCminahu8Gmr7FAVnQXBTSMaBxn6qmBNkdm9tDkFzWmjmDrLBCQSTa7BHgpEjCXzMTCyDsQLSmcGYJHBB7cTwpqLNRKGP47uw/0/*)#qwer1234
+
+-- also supported --
+tr([a1b2c3d4/86h/0h/0h]xpub.../0/*)
+sh(wpkh([a1b2c3d4/49h/0h/0h]ypub.../0/*))
+pkh([a1b2c3d4/44h/0h/0h]xpub.../0/*)`
 
 export default function InputScreen({ onAnalyze, onSettings, error }) {
   const [descriptor, setDescriptor] = useState('')
@@ -142,7 +147,8 @@ export default function InputScreen({ onAnalyze, onSettings, error }) {
           </button>
 
           <p className={styles.hint}>
-            Supports <code>wpkh()</code> descriptors with xpub / zpub / ypub
+            Supports <code>wpkh()</code>, <code>tr()</code>, <code>sh(wpkh())</code>,{' '}
+            <code>pkh()</code> — with xpub / ypub / zpub
           </p>
         </form>
 
