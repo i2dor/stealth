@@ -6,6 +6,8 @@ import os
 import json
 import time
 from collections import defaultdict
+from dataclasses import dataclass, field
+from typing import Optional, Set
 
 import requests
 from bip_utils import (
@@ -31,10 +33,6 @@ MAX_AUTO_ADDRESSES = int(os.environ.get("MAX_AUTO_ADDRESSES", "500"))
 
 # Whirlpool known pool denominations in satoshis
 WHIRLPOOL_POOL_AMOUNTS = {100_000, 1_000_000, 5_000_000, 50_000_000}
-# Dust threshold — anything at or below this is flagged
-DUST_LIMIT_SATS = 1000
-# High fee threshold
-HIGH_FEE_THRESHOLD = 50
 # Round-number payment detection
 ROUND_AMOUNT_SATS = [100_000, 500_000, 1_000_000, 5_000_000, 10_000_000,
                      50_000_000, 100_000_000]
@@ -57,6 +55,102 @@ session.headers.update({"User-Agent": "Stealth-Wallet-Analyzer/1.0"})
 
 _request_count = 0
 _scan_start_offset = 0
+
+
+# ─────────────────────────────────────────────────────────
+# SCAN CONFIG
+# ─────────────────────────────────────────────────────────
+
+# Full list of detector IDs — used for validation and defaults
+ALL_DETECTORS = {
+    "address_reuse",
+    "dust",
+    "dust_spending",
+    "cioh",
+    "change_detection",
+    "consolidation",
+    "script_type_mixing",
+    "cluster_merge",
+    "utxo_age_spread",
+    "exchange_origin",
+    "tainted_utxo_merge",
+    "behavioral_fingerprint",
+    "payjoin_interaction",
+    "whirlpool_patterns",
+    "fee_fingerprinting",
+}
+
+
+@dataclass
+class ScanConfig:
+    # ── Dust thresholds ──────────────────────────────────
+    dust_sats: int = 1000          # outputs at/below this are flagged as dust
+    strict_dust_sats: int = 546    # at/below → HIGH severity; above → MEDIUM
+
+    # ── Consolidation ────────────────────────────────────
+    consolidation_min_inputs: int = 3
+    consolidation_max_outputs: int = 2
+
+    # ── Exchange-origin batch detection ──────────────────
+    exchange_batch_outputs: int = 5
+
+    # ── UTXO age / dormancy ──────────────────────────────
+    utxo_age_spread_blocks: int = 10          # minimum spread to report
+    dormant_utxo_blocks: int = 100            # gap from newest to be "dormant"
+
+    # ── CIOH / dust-spending input thresholds ────────────
+    normal_input_min_sats: int = 10_000       # below this is NOT a "normal" input
+
+    # ── Behavioral fingerprint ───────────────────────────
+    round_payment_pct_threshold: float = 60.0 # % of round payments to flag
+    fee_rate_cv_threshold: float = 0.15       # coefficient of variation
+    min_send_txs_for_behavioral: int = 3      # need at least N send-txs
+
+    # ── Fee fingerprinting ───────────────────────────────
+    tiny_change_ratio: float = 0.01           # change/payment ratio threshold
+    tiny_change_max_sats: int = 10_000
+
+    # ── Enabled detectors (None = all) ───────────────────
+    enabled_detectors: Optional[Set[str]] = None
+
+    def is_enabled(self, detector_id: str) -> bool:
+        """Return True if the given detector should run."""
+        if self.enabled_detectors is None:
+            return True
+        return detector_id in self.enabled_detectors
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "ScanConfig":
+        """Build a ScanConfig from a plain dict (e.g. parsed from JSON)."""
+        cfg = cls()
+        int_fields = {
+            "dust_sats", "strict_dust_sats",
+            "consolidation_min_inputs", "consolidation_max_outputs",
+            "exchange_batch_outputs",
+            "utxo_age_spread_blocks", "dormant_utxo_blocks",
+            "normal_input_min_sats",
+            "min_send_txs_for_behavioral",
+            "tiny_change_max_sats",
+        }
+        float_fields = {
+            "round_payment_pct_threshold",
+            "fee_rate_cv_threshold",
+            "tiny_change_ratio",
+        }
+        for k, v in d.items():
+            if k == "enabled_detectors":
+                if v is None:
+                    cfg.enabled_detectors = None
+                else:
+                    cfg.enabled_detectors = {str(x) for x in v} & ALL_DETECTORS
+            elif k in int_fields:
+                setattr(cfg, k, int(v))
+            elif k in float_fields:
+                setattr(cfg, k, float(v))
+        return cfg
+
+
+DEFAULT_CONFIG = ScanConfig()
 
 
 def configure_proxy(proxy_url):
@@ -93,7 +187,6 @@ def _rate_limit_delay():
 # DESCRIPTOR PARSING
 # ─────────────────────────────────────────────────────────
 
-# Shared pattern for the key origin + xpub/branch portion used by all types
 _KEY_PATTERN = r"""
     (?:
         \[
@@ -110,7 +203,6 @@ _KEY_PATTERN = r"""
 _WPKH_RE = re.compile(r"^wpkh\(" + _KEY_PATTERN + r"\)$", re.VERBOSE)
 _TR_RE   = re.compile(r"^tr\("   + _KEY_PATTERN + r"\)$", re.VERBOSE)
 _PKH_RE  = re.compile(r"^pkh\("  + _KEY_PATTERN + r"\)$", re.VERBOSE)
-# sh(wpkh(...)) — wraps the inner key the same way
 _SH_WPKH_RE = re.compile(r"^sh\(wpkh\(" + _KEY_PATTERN + r"\)\)$", re.VERBOSE)
 
 _DESCRIPTOR_TYPES = [
@@ -190,7 +282,7 @@ def xpub_net_and_key(extpub):
 
 
 # ─────────────────────────────────────────────────────────
-# ADDRESS DERIVATION — one function per script type
+# ADDRESS DERIVATION
 # ─────────────────────────────────────────────────────────
 
 def _child_pubkey_bytes(extpub, branch, index):
@@ -269,7 +361,6 @@ def derive_addresses(parsed, count, branch, start_index=0):
     raise ValueError(f"Unknown dtype: {dtype}")
 
 
-# Legacy name kept for any external callers
 def derive_wpkh_addresses(extpub, count, branch, start_index=0):
     net = xpub_net_and_key(extpub)
     return _derive_p2wpkh(extpub, count, branch, start_index, net)
@@ -461,7 +552,7 @@ class TxGraph:
         return addrs
 
     def get_script_type(self, address):
-        """Return script type for an address — from addr_map or address-prefix heuristic."""
+        """Return script type — from addr_map or address-prefix heuristic."""
         meta = self.addr_map.get(address)
         if meta:
             return meta.get("type", "unknown")
@@ -477,14 +568,10 @@ class TxGraph:
 
 
 # ─────────────────────────────────────────────────────────
-# DETECTORS
+# DETECTORS  (all accept cfg: ScanConfig as last param)
 # ─────────────────────────────────────────────────────────
 
-def detect_address_reuse(g):
-    """
-    Flag any wallet address that received funds in 2+ distinct transactions.
-    Checks both unspent and historical (spent) receives.
-    """
+def detect_address_reuse(g, cfg: ScanConfig):
     findings = []
     for addr in g.our_addrs:
         receive_txids = set()
@@ -499,7 +586,7 @@ def detect_address_reuse(g):
                 "type": "ADDRESS_REUSE",
                 "severity": "HIGH",
                 "description": (
-                    f"Address {addr[:12]}\u2026 reused: received funds in "
+                    f"Address {addr[:12]}… reused: received funds in "
                     f"{len(receive_txids)} separate transaction(s)."
                 ),
                 "details": {
@@ -512,27 +599,22 @@ def detect_address_reuse(g):
     return findings
 
 
-def detect_dust(g):
-    """
-    Detect dust in two ways:
-    1. Unspent dust UTXOs currently in the wallet (active risk)
-    2. Historical dust outputs received (already spent — still reveals a dust attack attempt)
-    """
+def detect_dust(g, cfg: ScanConfig):
     findings = []
     reported = set()
 
     current_unspent_txids = {(u["address"], u["txid"], u["vout"]) for u in g.utxos}
     for u in g.utxos:
         sats = satoshis(u["amount"])
-        if sats <= DUST_LIMIT_SATS and g.is_ours(u.get("address", "")):
+        if sats <= cfg.dust_sats and g.is_ours(u.get("address", "")):
             key = (u["address"], u["txid"], u["vout"])
             reported.add(key)
-            severity = "HIGH" if sats <= 546 else "MEDIUM"
+            severity = "HIGH" if sats <= cfg.strict_dust_sats else "MEDIUM"
             findings.append({
                 "type": "DUST",
                 "severity": severity,
                 "description": (
-                    f"Unspent dust UTXO at {u['address'][:12]}\u2026 "
+                    f"Unspent dust UTXO at {u['address'][:12]}… "
                     f"({sats:,} sats). If spent with other inputs, it links your UTXOs together."
                 ),
                 "details": {
@@ -551,13 +633,13 @@ def detect_dust(g):
         for out in outputs:
             sats = out["value"]
             key = (addr, out["txid"], out["n"])
-            if sats <= DUST_LIMIT_SATS and key not in reported and key not in current_unspent_txids:
+            if sats <= cfg.dust_sats and key not in reported and key not in current_unspent_txids:
                 reported.add(key)
                 findings.append({
                     "type": "DUST",
                     "severity": "LOW",
                     "description": (
-                        f"Historical dust output at {addr[:12]}\u2026 "
+                        f"Historical dust output at {addr[:12]}… "
                         f"({sats:,} sats, already spent). Indicates a past dust attack attempt."
                     ),
                     "details": {
@@ -573,10 +655,8 @@ def detect_dust(g):
     return findings
 
 
-def detect_dust_spending(g):
-    """Detect transactions that spend dust alongside normal inputs."""
+def detect_dust_spending(g, cfg: ScanConfig):
     findings = []
-    DUST_SATS = 1000
 
     for txid in g.our_txids:
         input_addrs = g.get_input_addresses(txid)
@@ -589,9 +669,9 @@ def detect_dust_spending(g):
             if not g.is_ours(ia["address"]):
                 continue
             sats = satoshis(ia["value"])
-            if sats <= DUST_SATS:
+            if sats <= cfg.dust_sats:
                 dust_inputs.append(ia)
-            elif sats > 10_000:
+            elif sats > cfg.normal_input_min_sats:
                 normal_inputs.append(ia)
 
         if dust_inputs and normal_inputs:
@@ -599,7 +679,7 @@ def detect_dust_spending(g):
                 "type": "DUST_SPENDING",
                 "severity": "HIGH",
                 "description": (
-                    f"TX {txid[:16]}\u2026 spends {len(dust_inputs)} dust input(s) alongside "
+                    f"TX {txid[:16]}… spends {len(dust_inputs)} dust input(s) alongside "
                     f"{len(normal_inputs)} normal input(s) — permanently links these addresses."
                 ),
                 "details": {
@@ -616,7 +696,7 @@ def detect_dust_spending(g):
     return findings
 
 
-def detect_cioh(g):
+def detect_cioh(g, cfg: ScanConfig):
     findings = []
     for txid in g.our_txids:
         inputs = g.get_input_addresses(txid)
@@ -631,7 +711,7 @@ def detect_cioh(g):
             findings.append({
                 "type": "CIOH",
                 "severity": severity,
-                "description": f"TX {txid[:16]}\u2026 merges {n_ours}/{total} of your inputs ({ownership_pct}% ownership).",
+                "description": f"TX {txid[:16]}… merges {n_ours}/{total} of your inputs ({ownership_pct}% ownership).",
                 "details": {
                     "txid": txid,
                     "our_inputs": n_ours,
@@ -644,12 +724,7 @@ def detect_cioh(g):
     return findings
 
 
-def detect_change_detection(g):
-    """
-    Detect transactions where the change output is easily distinguishable via
-    standard heuristics: round payment vs non-round change, script type mismatch,
-    internal derivation path.
-    """
+def detect_change_detection(g, cfg: ScanConfig):
     findings = []
 
     for txid in g.our_txids:
@@ -706,7 +781,7 @@ def detect_change_detection(g):
                 "type": "CHANGE_DETECTION",
                 "severity": "MEDIUM",
                 "description": (
-                    f"TX {txid[:16]}\u2026 has identifiable change output(s) "
+                    f"TX {txid[:16]}… has identifiable change output(s) "
                     f"({len(problems)} heuristic(s) matched)."
                 ),
                 "details": {
@@ -727,13 +802,8 @@ def detect_change_detection(g):
     return findings
 
 
-def detect_consolidation(g):
-    """
-    Detect UTXOs born from a prior consolidation transaction
-    (>= 3 inputs, <= 2 outputs).
-    """
+def detect_consolidation(g, cfg: ScanConfig):
     findings = []
-    CONSOLIDATION_THRESHOLD = 3
     seen_txids = set()
 
     for utxo in g.utxos:
@@ -747,7 +817,7 @@ def detect_consolidation(g):
             continue
         n_in = len(parent.get("vin", []))
         n_out = len(parent.get("vout", []))
-        if n_in >= CONSOLIDATION_THRESHOLD and n_out <= 2:
+        if n_in >= cfg.consolidation_min_inputs and n_out <= cfg.consolidation_max_outputs:
             seen_txids.add(parent_txid)
             parent_inputs = g.get_input_addresses(parent_txid)
             our_parent_in = [ia for ia in parent_inputs if g.is_ours(ia["address"])]
@@ -755,7 +825,7 @@ def detect_consolidation(g):
                 "type": "CONSOLIDATION",
                 "severity": "MEDIUM",
                 "description": (
-                    f"UTXO {parent_txid[:16]}\u2026:{utxo['vout']} "
+                    f"UTXO {parent_txid[:16]}…:{utxo['vout']} "
                     f"({utxo['amount']:.8f} BTC) born from a {n_in}-input consolidation."
                 ),
                 "details": {
@@ -776,8 +846,7 @@ def detect_consolidation(g):
     return findings
 
 
-def detect_script_type_mixing(g):
-    """Detect transactions that mix different input script types."""
+def detect_script_type_mixing(g, cfg: ScanConfig):
     findings = []
 
     for txid in g.our_txids:
@@ -797,7 +866,7 @@ def detect_script_type_mixing(g):
                 "type": "SCRIPT_TYPE_MIXING",
                 "severity": "HIGH",
                 "description": (
-                    f"TX {txid[:16]}\u2026 mixes input script types: {sorted(types)}. "
+                    f"TX {txid[:16]}… mixes input script types: {sorted(types)}. "
                     "Each type combination is a rare fingerprint."
                 ),
                 "details": {
@@ -822,11 +891,7 @@ def detect_script_type_mixing(g):
     return findings
 
 
-def detect_cluster_merge(g):
-    """
-    Detect transactions that merge UTXOs from different funding chains
-    (cross-origin input mixing).
-    """
+def detect_cluster_merge(g, cfg: ScanConfig):
     findings = []
 
     for txid in g.our_txids:
@@ -866,7 +931,7 @@ def detect_cluster_merge(g):
                     "type": "CLUSTER_MERGE",
                     "severity": "HIGH",
                     "description": (
-                        f"TX {txid[:16]}\u2026 merges UTXOs from "
+                        f"TX {txid[:16]}… merges UTXOs from "
                         f"{len(funding_sources)} different funding chains."
                     ),
                     "details": {
@@ -883,11 +948,7 @@ def detect_cluster_merge(g):
     return findings
 
 
-def detect_utxo_age_spread(g):
-    """
-    Detect UTXOs with significantly different ages (dormancy patterns).
-    Uses blockheight from Esplora status instead of confirmation count.
-    """
+def detect_utxo_age_spread(g, cfg: ScanConfig):
     findings = []
 
     our_utxos = [u for u in g.utxos if g.is_ours(u.get("address", ""))]
@@ -903,7 +964,7 @@ def detect_utxo_age_spread(g):
     newest = aged[-1]
     spread = newest["blockheight"] - oldest["blockheight"]
 
-    if spread < 10:
+    if spread < cfg.utxo_age_spread_blocks:
         return findings
 
     findings.append({
@@ -933,19 +994,18 @@ def detect_utxo_age_spread(g):
         ),
     })
 
-    OLD_THRESHOLD = 100  # blocks
-    old_utxos = [u for u in aged if (newest["blockheight"] - u["blockheight"]) >= OLD_THRESHOLD]
+    old_utxos = [u for u in aged if (newest["blockheight"] - u["blockheight"]) >= cfg.dormant_utxo_blocks]
     if old_utxos:
         findings.append({
             "type": "DORMANT_UTXOS",
             "severity": "LOW",
             "description": (
                 f"{len(old_utxos)} UTXO(s) are significantly older than the newest "
-                f"(>= {OLD_THRESHOLD} blocks gap) — dormant/hoarded coin pattern."
+                f"(>= {cfg.dormant_utxo_blocks} blocks gap) — dormant/hoarded coin pattern."
             ),
             "details": {
                 "count": len(old_utxos),
-                "threshold_blocks": OLD_THRESHOLD,
+                "threshold_blocks": cfg.dormant_utxo_blocks,
                 "utxos": [
                     {"txid": u["txid"], "blockheight": u["blockheight"], "amount_btc": round(u["amount"], 8)}
                     for u in old_utxos[:5]
@@ -960,13 +1020,8 @@ def detect_utxo_age_spread(g):
     return findings
 
 
-def detect_exchange_origin(g):
-    """
-    Detect UTXOs that likely originated from exchange batch withdrawals.
-    Uses output count, unique recipient count, and input/output ratio heuristics.
-    """
+def detect_exchange_origin(g, cfg: ScanConfig):
     findings = []
-    BATCH_THRESHOLD = 5
 
     for txid in g.our_txids:
         tx = g.fetch_tx(txid)
@@ -975,7 +1030,7 @@ def detect_exchange_origin(g):
 
         vouts = tx.get("vout", [])
         n_out = len(vouts)
-        if n_out < BATCH_THRESHOLD:
+        if n_out < cfg.exchange_batch_outputs:
             continue
 
         our_inputs = [ia for ia in g.get_input_addresses(txid) if g.is_ours(ia["address"])]
@@ -995,7 +1050,7 @@ def detect_exchange_origin(g):
             for vout in vouts
             if vout.get("scriptpubkey_address")
         }
-        if len(unique_addrs) >= BATCH_THRESHOLD:
+        if len(unique_addrs) >= cfg.exchange_batch_outputs:
             signals.append(f"{len(unique_addrs)} unique recipient addresses")
 
         input_addrs = g.get_input_addresses(txid)
@@ -1013,7 +1068,7 @@ def detect_exchange_origin(g):
                 "type": "EXCHANGE_ORIGIN",
                 "severity": "MEDIUM",
                 "description": (
-                    f"TX {txid[:16]}\u2026 looks like an exchange batch withdrawal "
+                    f"TX {txid[:16]}… looks like an exchange batch withdrawal "
                     f"({len(signals)} signal(s) matched)."
                 ),
                 "details": {
@@ -1034,30 +1089,17 @@ def detect_exchange_origin(g):
     return findings
 
 
-def detect_tainted_utxo_merge(g):
-    """
-    Detect two taint scenarios:
-
-    1. TAINTED_UTXO_MERGE (finding, HIGH): a transaction mixes a UTXO that came
-       directly from an exchange-origin tx with unrelated clean UTXOs. This links
-       your real identity (known to the exchange) to all those inputs.
-
-    2. DIRECT_TAINT (warning, HIGH): a wallet address received funds directly from
-       an exchange-origin tx, but those UTXOs have not yet been merged with anything.
-       The taint exists but has not been propagated — a preemptive alert.
-    """
+def detect_tainted_utxo_merge(g, cfg: ScanConfig):
     findings = []
     warnings = []
-    BATCH_THRESHOLD = 5
 
-    # Build the set of exchange-origin txids visible in the current scan window
     exchange_txids = set()
     for txid in g.our_txids:
         tx = g.fetch_tx(txid)
         if not tx:
             continue
         vouts = tx.get("vout", [])
-        if len(vouts) < BATCH_THRESHOLD:
+        if len(vouts) < cfg.exchange_batch_outputs:
             continue
         our_inputs = [ia for ia in g.get_input_addresses(txid) if g.is_ours(ia["address"])]
         if our_inputs:
@@ -1067,9 +1109,9 @@ def detect_tainted_utxo_merge(g):
             exchange_txids.add(txid)
 
     if not exchange_txids:
-        return findings  # no warnings either — nothing to taint
+        return findings, warnings
 
-    # 1. TAINTED_UTXO_MERGE: exchange UTXO co-spent with clean UTXOs
+    # 1. TAINTED_UTXO_MERGE — exchange UTXO co-spent with clean UTXOs
     for txid in g.our_txids:
         input_addrs = g.get_input_addresses(txid)
         if len(input_addrs) < 2:
@@ -1087,7 +1129,7 @@ def detect_tainted_utxo_merge(g):
                 "type": "TAINTED_UTXO_MERGE",
                 "severity": "HIGH",
                 "description": (
-                    f"TX {txid[:16]}\u2026 mixes {len(tainted)} exchange-origin (KYC-tainted) "
+                    f"TX {txid[:16]}… mixes {len(tainted)} exchange-origin (KYC-tainted) "
                     f"input(s) with {len(clean)} unrelated input(s) — links your identity to all inputs."
                 ),
                 "details": {
@@ -1108,16 +1150,13 @@ def detect_tainted_utxo_merge(g):
                 ),
             })
 
-    # 2. DIRECT_TAINT: wallet address received directly from an exchange-origin tx
-    #    and the UTXO is still unspent (not yet merged — warn before it happens)
+    # 2. DIRECT_TAINT — unspent exchange UTXO not yet merged (preemptive warning)
     already_merged_txids = {f.get("details", {}).get("txid", "") for f in findings}
     unspent_txids = {u["txid"] for u in g.utxos if g.is_ours(u.get("address", ""))}
 
     for ex_txid in exchange_txids:
-        # Only warn if this exchange UTXO is still unspent in the wallet
         if ex_txid not in unspent_txids:
             continue
-        # Don't double-warn if it's already flagged as merged
         if ex_txid in already_merged_txids:
             continue
 
@@ -1129,7 +1168,7 @@ def detect_tainted_utxo_merge(g):
             "type": "DIRECT_TAINT",
             "severity": "HIGH",
             "description": (
-                f"TX {ex_txid[:16]}\u2026 is directly from a known exchange-origin source. "
+                f"TX {ex_txid[:16]}… is directly from a known exchange-origin source. "
                 "The received UTXO(s) are KYC-tainted and still unspent — "
                 "do not merge with other UTXOs without CoinJoin first."
             ),
@@ -1150,12 +1189,7 @@ def detect_tainted_utxo_merge(g):
     return findings, warnings
 
 
-def detect_behavioral_fingerprint(g):
-    """
-    Analyze transaction set for behavioral patterns that make the user
-    identifiable through consistency: round amounts, output count uniformity,
-    RBF signaling, locktime, fee rate, change/payment type mismatch.
-    """
+def detect_behavioral_fingerprint(g, cfg: ScanConfig):
     findings = []
 
     send_txids = []
@@ -1165,7 +1199,7 @@ def detect_behavioral_fingerprint(g):
         if our_in:
             send_txids.append(txid)
 
-    if len(send_txids) < 3:
+    if len(send_txids) < cfg.min_send_txs_for_behavioral:
         return findings
 
     output_counts = []
@@ -1220,7 +1254,7 @@ def detect_behavioral_fingerprint(g):
 
     if total_payments > 0:
         round_pct = uses_round_amounts / total_payments * 100
-        if round_pct > 60:
+        if round_pct > cfg.round_payment_pct_threshold:
             problems.append(
                 f"Round payment amounts: {round_pct:.0f}% of payments are round numbers — "
                 "a distinctive behavioral pattern that aids clustering."
@@ -1276,7 +1310,7 @@ def detect_behavioral_fingerprint(g):
             variance = sum((f - avg_fee) ** 2 for f in fee_rates) / len(fee_rates)
             stddev = variance ** 0.5
             cv = stddev / avg_fee
-            if cv < 0.15:
+            if cv < cfg.fee_rate_cv_threshold:
                 problems.append(
                     f"Very consistent fee rate: avg {avg_fee:.1f} sat/vB ± {stddev:.1f} "
                     f"(CV={cv:.2f}) — low variance suggests fixed-fee-rate wallet configuration."
@@ -1318,7 +1352,7 @@ def detect_behavioral_fingerprint(g):
     return findings
 
 
-def detect_payjoin_interaction(g):
+def detect_payjoin_interaction(g, cfg: ScanConfig):
     findings = []
     for txid in g.our_txids:
         tx = g.fetch_tx(txid)
@@ -1345,7 +1379,7 @@ def detect_payjoin_interaction(g):
                 "type": "PAYJOIN_INTERACTION",
                 "severity": "LOW",
                 "description": (
-                    f"TX {txid[:16]}\u2026 has mixed inputs (yours + external) and outputs to your wallet. "
+                    f"TX {txid[:16]}… has mixed inputs (yours + external) and outputs to your wallet. "
                     "Consistent with a PayJoin/P2EP transaction."
                 ),
                 "details": {
@@ -1355,14 +1389,14 @@ def detect_payjoin_interaction(g):
                     "our_outputs": len(our_output_addrs),
                 },
                 "correction": (
-                    "If you intentionally used PayJoin \u2014 great, this improves privacy. "
+                    "If you intentionally used PayJoin — great, this improves privacy. "
                     "If not, an external party contributed inputs alongside yours, which could be a privacy risk."
                 ),
             })
     return findings
 
 
-def detect_whirlpool_patterns(g):
+def detect_whirlpool_patterns(g, cfg: ScanConfig):
     findings = []
     for txid in g.our_txids:
         tx = g.fetch_tx(txid)
@@ -1387,7 +1421,7 @@ def detect_whirlpool_patterns(g):
                         "type": "WHIRLPOOL_COINJOIN",
                         "severity": "LOW",
                         "description": (
-                            f"TX {txid[:16]}\u2026 matches Whirlpool CoinJoin pattern "
+                            f"TX {txid[:16]}… matches Whirlpool CoinJoin pattern "
                             f"({len(matching)} equal outputs of {pool_sats:,} sats)."
                         ),
                         "details": {
@@ -1397,7 +1431,7 @@ def detect_whirlpool_patterns(g):
                             "our_mixed_outputs": len(our_outputs),
                         },
                         "correction": (
-                            "This looks like a Whirlpool mix \u2014 good for privacy! "
+                            "This looks like a Whirlpool mix — good for privacy! "
                             "Make sure post-mix UTXOs are spent carefully to preserve the anonymity set."
                         ),
                     })
@@ -1405,7 +1439,7 @@ def detect_whirlpool_patterns(g):
     return findings
 
 
-def detect_fee_fingerprinting(g):
+def detect_fee_fingerprinting(g, cfg: ScanConfig):
     findings = []
     round_fee_rates = {1, 2, 5, 10, 15, 20, 25, 50, 100}
     round_fee_txids = []
@@ -1451,7 +1485,7 @@ def detect_fee_fingerprinting(g):
         if our_outputs and non_our_outputs:
             our_max = max(v.get("value", 0) for v in our_outputs)
             ext_max = max(v.get("value", 0) for v in non_our_outputs)
-            if ext_max > 0 and our_max / ext_max < 0.01 and our_max < 10_000:
+            if ext_max > 0 and our_max / ext_max < cfg.tiny_change_ratio and our_max < cfg.tiny_change_max_sats:
                 tiny_change_txids.append({
                     "txid": txid,
                     "change_sats": our_max,
@@ -1464,7 +1498,7 @@ def detect_fee_fingerprinting(g):
             "severity": "LOW",
             "description": (
                 f"{len(round_fee_txids)} transaction(s) use a round fee rate "
-                "(e.g. 1, 5, 10 sat/vB) \u2014 a fingerprint of some wallet software."
+                "(e.g. 1, 5, 10 sat/vB) — a fingerprint of some wallet software."
             ),
             "details": {
                 "transactions": round_fee_txids[:10],
@@ -1481,7 +1515,7 @@ def detect_fee_fingerprinting(g):
             "type": "BATCH_PAYMENT_FINGERPRINT",
             "severity": "LOW",
             "description": (
-                f"{len(batch_payment_txids)} transaction(s) send to 5+ external outputs \u2014 "
+                f"{len(batch_payment_txids)} transaction(s) send to 5+ external outputs — "
                 "typical of exchange or custodial batching."
             ),
             "details": {
@@ -1526,9 +1560,12 @@ def build_addr_map(addresses, branch, start_index=0, script_type="p2wpkh"):
     return addr_map
 
 
-def scan_branch(parsed, offset, count, branch):
+def scan_branch(parsed, offset, count, branch, cfg: ScanConfig = None):
     global _scan_start_offset
     _scan_start_offset = offset
+
+    if cfg is None:
+        cfg = DEFAULT_CONFIG
 
     addresses = derive_addresses(parsed, count, branch, start_index=offset)
     addr_map = build_addr_map(addresses, branch, start_index=offset, script_type=parsed["script_type"])
@@ -1538,30 +1575,41 @@ def scan_branch(parsed, offset, count, branch):
     findings = []
     warnings = []
 
-    findings.extend(detect_address_reuse(graph))
-    findings.extend(detect_dust(graph))
-    findings.extend(detect_dust_spending(graph))
-    findings.extend(detect_cioh(graph))
-    findings.extend(detect_payjoin_interaction(graph))
-    findings.extend(detect_whirlpool_patterns(graph))
-    findings.extend(detect_fee_fingerprinting(graph))
+    # Each detector call is guarded by cfg.is_enabled()
+    if cfg.is_enabled("address_reuse"):
+        findings.extend(detect_address_reuse(graph, cfg))
+    if cfg.is_enabled("dust"):
+        findings.extend(detect_dust(graph, cfg))
+    if cfg.is_enabled("dust_spending"):
+        findings.extend(detect_dust_spending(graph, cfg))
+    if cfg.is_enabled("cioh"):
+        findings.extend(detect_cioh(graph, cfg))
+    if cfg.is_enabled("payjoin_interaction"):
+        findings.extend(detect_payjoin_interaction(graph, cfg))
+    if cfg.is_enabled("whirlpool_patterns"):
+        findings.extend(detect_whirlpool_patterns(graph, cfg))
+    if cfg.is_enabled("fee_fingerprinting"):
+        findings.extend(detect_fee_fingerprinting(graph, cfg))
+    if cfg.is_enabled("change_detection"):
+        findings.extend(detect_change_detection(graph, cfg))
+    if cfg.is_enabled("consolidation"):
+        findings.extend(detect_consolidation(graph, cfg))
+    if cfg.is_enabled("script_type_mixing"):
+        findings.extend(detect_script_type_mixing(graph, cfg))
+    if cfg.is_enabled("cluster_merge"):
+        findings.extend(detect_cluster_merge(graph, cfg))
 
-    # Ported / extended detectors
-    findings.extend(detect_change_detection(graph))
-    findings.extend(detect_consolidation(graph))
-    findings.extend(detect_script_type_mixing(graph))
-    findings.extend(detect_cluster_merge(graph))
+    if cfg.is_enabled("tainted_utxo_merge"):
+        taint_findings, taint_warnings = detect_tainted_utxo_merge(graph, cfg)
+        findings.extend(taint_findings)
+        warnings.extend(taint_warnings)
 
-    # detect_tainted_utxo_merge returns (findings, warnings)
-    taint_findings, taint_warnings = detect_tainted_utxo_merge(graph)
-    findings.extend(taint_findings)
-    warnings.extend(taint_warnings)
+    if cfg.is_enabled("exchange_origin"):
+        findings.extend(detect_exchange_origin(graph, cfg))
+    if cfg.is_enabled("behavioral_fingerprint"):
+        findings.extend(detect_behavioral_fingerprint(graph, cfg))
 
-    findings.extend(detect_exchange_origin(graph))
-    findings.extend(detect_behavioral_fingerprint(graph))
-
-    # Age/dormancy — dormant goes to warnings
-    age_findings = detect_utxo_age_spread(graph)
+    age_findings = detect_utxo_age_spread(graph, cfg) if cfg.is_enabled("utxo_age_spread") else []
     for f in age_findings:
         if f["type"] == "DORMANT_UTXOS":
             warnings.append(f)
@@ -1652,9 +1700,12 @@ def _merge_branch_reports(reports):
     }
 
 
-def run_auto_scan(descriptor, branch_mode="receive"):
+def run_auto_scan(descriptor, branch_mode="receive", cfg: ScanConfig = None):
     global _request_count
     _request_count = 0
+
+    if cfg is None:
+        cfg = DEFAULT_CONFIG
 
     parsed = parse_descriptor(descriptor)
 
@@ -1675,7 +1726,7 @@ def run_auto_scan(descriptor, branch_mode="receive"):
 
         while offset < MAX_AUTO_ADDRESSES:
             debug(f"Auto-scan branch={branch} offset={offset} gap={consecutive_inactive}/{GAP_LIMIT}")
-            report = scan_branch(parsed, offset, AUTO_BATCH_SIZE, branch)
+            report = scan_branch(parsed, offset, AUTO_BATCH_SIZE, branch, cfg)
             branch_reports.append(report)
             total_addresses_scanned += report["stats"]["addresses_derived"]
 
@@ -1717,6 +1768,7 @@ def run_auto_scan(descriptor, branch_mode="receive"):
         "api_base": API_BASE,
         "request_delay_ms": int(REQUEST_DELAY * 1000),
         "proxy": session.proxies.get("https", None),
+        "enabled_detectors": sorted(cfg.enabled_detectors) if cfg.enabled_detectors is not None else "all",
     }
     final["scan_window"] = {
         "from_index": final["aggregate_scan_window"]["from_index"],
@@ -1728,9 +1780,12 @@ def run_auto_scan(descriptor, branch_mode="receive"):
     return final
 
 
-def run_scan(descriptor, offset=0, count=60, branch_mode="receive"):
+def run_scan(descriptor, offset=0, count=60, branch_mode="receive", cfg: ScanConfig = None):
     global _request_count
     _request_count = 0
+
+    if cfg is None:
+        cfg = DEFAULT_CONFIG
 
     if offset < 0:
         raise ValueError("offset must be >= 0")
@@ -1748,7 +1803,7 @@ def run_scan(descriptor, offset=0, count=60, branch_mode="receive"):
 
     reports = []
     for branch in branches:
-        report = scan_branch(parsed, offset, count, branch)
+        report = scan_branch(parsed, offset, count, branch, cfg)
 
         if (
             branch == 0
@@ -1756,7 +1811,7 @@ def run_scan(descriptor, offset=0, count=60, branch_mode="receive"):
             and report["stats"]["active_addresses"] == 0
             and report["stats"]["transactions_analyzed"] == 0
         ):
-            fallback = scan_branch(parsed, offset, count, 1)
+            fallback = scan_branch(parsed, offset, count, 1, cfg)
             has_activity = (
                 fallback["stats"]["active_addresses"] > 0
                 or fallback["stats"]["transactions_analyzed"] > 0
@@ -1793,6 +1848,7 @@ def run_scan(descriptor, offset=0, count=60, branch_mode="receive"):
             "api_base": API_BASE,
             "request_delay_ms": int(REQUEST_DELAY * 1000),
             "proxy": session.proxies.get("https", None),
+            "enabled_detectors": sorted(cfg.enabled_detectors) if cfg.enabled_detectors is not None else "all",
         }
         return final
 
@@ -1811,5 +1867,6 @@ def run_scan(descriptor, offset=0, count=60, branch_mode="receive"):
         "api_base": API_BASE,
         "request_delay_ms": int(REQUEST_DELAY * 1000),
         "proxy": session.proxies.get("https", None),
+        "enabled_detectors": sorted(cfg.enabled_detectors) if cfg.enabled_detectors is not None else "all",
     }
     return merged

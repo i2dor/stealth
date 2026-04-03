@@ -5,7 +5,10 @@ import sys
 import os
 
 sys.path.insert(0, os.path.dirname(__file__))
-from detect_public import run_scan, run_auto_scan, configure_proxy
+from detect_public import (
+    run_scan, run_auto_scan, configure_proxy,
+    ScanConfig, ALL_DETECTORS,
+)
 
 class handler(BaseHTTPRequestHandler):
 
@@ -38,11 +41,33 @@ class handler(BaseHTTPRequestHandler):
         tor_proxy = params.get("tor_proxy", [""])[0].strip()
         configure_proxy(tor_proxy if tor_proxy else None)
 
+        # ── Build ScanConfig ────────────────────────────────
+        cfg = ScanConfig()
+
+        # ?config=<JSON> overrides thresholds in bulk
+        config_json = params.get("config", [""])[0].strip()
+        if config_json:
+            try:
+                cfg = ScanConfig.from_dict(json.loads(config_json))
+            except Exception:
+                pass  # fall back to defaults on bad JSON
+
+        # ?detectors=addr_reuse,cioh,...  (CSV whitelist)
+        # ?detectors=all  → all detectors (default)
+        detectors_param = params.get("detectors", ["all"])[0].strip()
+        if detectors_param and detectors_param.lower() != "all":
+            requested = {d.strip() for d in detectors_param.split(",") if d.strip()}
+            valid = requested & ALL_DETECTORS
+            if valid:
+                cfg.enabled_detectors = valid
+        # ───────────────────────────────────────────────────
+
         try:
             if auto:
-                report = run_auto_scan(descriptor, branch_mode=branch_mode)
+                report = run_auto_scan(descriptor, branch_mode=branch_mode, cfg=cfg)
             else:
-                report = run_scan(descriptor, offset=offset, count=count, branch_mode=branch_mode)
+                report = run_scan(descriptor, offset=offset, count=count,
+                                  branch_mode=branch_mode, cfg=cfg)
             self._json(200, report)
         except ValueError as e:
             self._json(400, {"error": str(e)})
