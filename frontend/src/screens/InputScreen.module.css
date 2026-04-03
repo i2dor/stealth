@@ -336,6 +336,19 @@
   color: var(--text-dim);
 }
 
+.hintLink {
+  color: var(--accent);
+  text-decoration: none;
+  opacity: 0.8;
+  white-space: nowrap;
+}
+
+.hintLink:hover {
+  opacity: 1;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
 .errorBox {
   margin-top: 12px;
   padding: 12px 14px;
