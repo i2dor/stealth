@@ -1036,13 +1036,21 @@ def detect_exchange_origin(g):
 
 def detect_tainted_utxo_merge(g):
     """
-    Detect transactions that merge a UTXO received directly from an exchange
-    (EXCHANGE_ORIGIN pattern) with UTXOs from other unrelated sources.
-    This is a higher-severity specialization of CLUSTER_MERGE for the KYC-taint case.
+    Detect two taint scenarios:
+
+    1. TAINTED_UTXO_MERGE (finding, HIGH): a transaction mixes a UTXO that came
+       directly from an exchange-origin tx with unrelated clean UTXOs. This links
+       your real identity (known to the exchange) to all those inputs.
+
+    2. DIRECT_TAINT (warning, HIGH): a wallet address received funds directly from
+       an exchange-origin tx, but those UTXOs have not yet been merged with anything.
+       The taint exists but has not been propagated — a preemptive alert.
     """
     findings = []
+    warnings = []
     BATCH_THRESHOLD = 5
 
+    # Build the set of exchange-origin txids visible in the current scan window
     exchange_txids = set()
     for txid in g.our_txids:
         tx = g.fetch_tx(txid)
@@ -1059,8 +1067,9 @@ def detect_tainted_utxo_merge(g):
             exchange_txids.add(txid)
 
     if not exchange_txids:
-        return findings
+        return findings  # no warnings either — nothing to taint
 
+    # 1. TAINTED_UTXO_MERGE: exchange UTXO co-spent with clean UTXOs
     for txid in g.our_txids:
         input_addrs = g.get_input_addresses(txid)
         if len(input_addrs) < 2:
@@ -1099,7 +1108,46 @@ def detect_tainted_utxo_merge(g):
                 ),
             })
 
-    return findings
+    # 2. DIRECT_TAINT: wallet address received directly from an exchange-origin tx
+    #    and the UTXO is still unspent (not yet merged — warn before it happens)
+    already_merged_txids = {f.get("details", {}).get("txid", "") for f in findings}
+    unspent_txids = {u["txid"] for u in g.utxos if g.is_ours(u.get("address", ""))}
+
+    for ex_txid in exchange_txids:
+        # Only warn if this exchange UTXO is still unspent in the wallet
+        if ex_txid not in unspent_txids:
+            continue
+        # Don't double-warn if it's already flagged as merged
+        if ex_txid in already_merged_txids:
+            continue
+
+        our_outputs = [o for o in g.get_output_addresses(ex_txid) if g.is_ours(o["address"])]
+        if not our_outputs:
+            continue
+
+        warnings.append({
+            "type": "DIRECT_TAINT",
+            "severity": "HIGH",
+            "description": (
+                f"TX {ex_txid[:16]}\u2026 is directly from a known exchange-origin source. "
+                "The received UTXO(s) are KYC-tainted and still unspent — "
+                "do not merge with other UTXOs without CoinJoin first."
+            ),
+            "details": {
+                "txid": ex_txid,
+                "received_outputs": [
+                    {"address": o["address"], "amount_btc": round(o["value"], 8)}
+                    for o in our_outputs
+                ],
+            },
+            "correction": (
+                "Pass this UTXO through a CoinJoin (Whirlpool, JoinMarket) before spending. "
+                "Never merge it with funds from other sources — doing so will link your exchange "
+                "identity to your entire spending history."
+            ),
+        })
+
+    return findings, warnings
 
 
 def detect_behavioral_fingerprint(g):
@@ -1503,7 +1551,12 @@ def scan_branch(parsed, offset, count, branch):
     findings.extend(detect_consolidation(graph))
     findings.extend(detect_script_type_mixing(graph))
     findings.extend(detect_cluster_merge(graph))
-    findings.extend(detect_tainted_utxo_merge(graph))
+
+    # detect_tainted_utxo_merge returns (findings, warnings)
+    taint_findings, taint_warnings = detect_tainted_utxo_merge(graph)
+    findings.extend(taint_findings)
+    warnings.extend(taint_warnings)
+
     findings.extend(detect_exchange_origin(graph))
     findings.extend(detect_behavioral_fingerprint(graph))
 
