@@ -148,7 +148,15 @@ export default function InputScreen({ onAnalyze, onSettings, error }) {
 
           <p className={styles.hint}>
             Supports <code>wpkh()</code>, <code>tr()</code>, <code>sh(wpkh())</code>,{' '}
-            <code>pkh()</code> — with xpub / ypub / zpub
+            <code>pkh()</code> — with xpub / ypub / zpub.{' '}
+            <a
+              href="https://github.com/i2dor/stealth/blob/main/docs/usage.md"
+              target="_blank"
+              rel="noopener noreferrer"
+              className={styles.hintLink}
+            >
+              How to use &amp; interpret results →
+            </a>
           </p>
         </form>
 
