@@ -8,7 +8,14 @@ import time
 from collections import defaultdict
 
 import requests
-from bip_utils import Bip32Secp256k1, P2WPKHAddrEncoder, CoinsConf
+from bip_utils import (
+    Bip32Secp256k1,
+    P2WPKHAddrEncoder,
+    P2SHAddrEncoder,
+    P2PKHAddrEncoder,
+    P2TRAddrEncoder,
+    CoinsConf,
+)
 
 _primary = os.environ.get("ESPLORA_API_URL", "https://blockstream.info/api").rstrip("/")
 _fallback = os.environ.get("ESPLORA_FALLBACK_URL", "https://mempool.space/api").rstrip("/")
@@ -81,6 +88,39 @@ def _rate_limit_delay():
     else:
         time.sleep(delay)
 
+
+# ─────────────────────────────────────────────────────────
+# DESCRIPTOR PARSING
+# ─────────────────────────────────────────────────────────
+
+# Shared pattern for the key origin + xpub/branch portion used by all types
+_KEY_PATTERN = r"""
+    (?:
+        \[
+            (?P<fingerprint>[0-9a-fA-F]{8})
+            (?P<origin_path>/[^\]]+)?
+        \]
+    )?
+    (?P<extpub>[A-Za-z0-9]+)
+    /
+    (?P<branch>0|1)
+    /\*
+"""
+
+_WPKH_RE = re.compile(r"^wpkh\(" + _KEY_PATTERN + r"\)$", re.VERBOSE)
+_TR_RE   = re.compile(r"^tr\("   + _KEY_PATTERN + r"\)$", re.VERBOSE)
+_PKH_RE  = re.compile(r"^pkh\("  + _KEY_PATTERN + r"\)$", re.VERBOSE)
+# sh(wpkh(...)) — wraps the inner key the same way
+_SH_WPKH_RE = re.compile(r"^sh\(wpkh\(" + _KEY_PATTERN + r"\)\)$", re.VERBOSE)
+
+_DESCRIPTOR_TYPES = [
+    (_WPKH_RE,    "wpkh",     "p2wpkh"),
+    (_TR_RE,      "tr",       "p2tr"),
+    (_PKH_RE,     "pkh",      "p2pkh"),
+    (_SH_WPKH_RE, "sh(wpkh)", "p2sh-p2wpkh"),
+]
+
+
 def parse_descriptor(descriptor):
     if descriptor is None:
         raise ValueError("descriptor is required")
@@ -94,53 +134,42 @@ def parse_descriptor(descriptor):
     if "#" in desc:
         desc = desc.split("#", 1)[0].strip()
 
-    pattern = re.compile(
-        r"""
-        ^wpkh\(
-            (?:
-                \[
-                    (?P<fingerprint>[0-9a-fA-F]{8})
-                    (?P<origin_path>/[^\]]+)?
-                \]
-            )?
-            (?P<extpub>[A-Za-z0-9]+)
-            /
-            (?P<branch>0|1)
-            /\*
-        \)$
-        """,
-        re.VERBOSE,
+    for pattern, dtype, script_type in _DESCRIPTOR_TYPES:
+        m = pattern.fullmatch(desc)
+        if not m:
+            continue
+
+        fingerprint = m.group("fingerprint")
+        origin_path = m.group("origin_path")
+        extpub      = m.group("extpub")
+        branch      = int(m.group("branch"))
+
+        if fingerprint is not None:
+            fingerprint = fingerprint.lower()
+        origin_path = origin_path.lstrip("/") if origin_path else ""
+
+        prefix = extpub[:4]
+        if prefix not in SLIP132_TO_BIP32:
+            raise ValueError(f"unsupported extended key prefix: {prefix}")
+
+        return {
+            "fingerprint": fingerprint,
+            "origin_path": origin_path,
+            "extpub":      extpub,
+            "branch":      branch,
+            "dtype":       dtype,
+            "script_type": script_type,
+            "descriptor":  desc,
+        }
+
+    raise ValueError(
+        "unsupported descriptor format — expected one of: "
+        "wpkh([fp/path]xpub.../0/*), "
+        "tr([fp/path]xpub.../0/*), "
+        "pkh([fp/path]xpub.../0/*), "
+        "sh(wpkh([fp/path]xpub.../0/*))"
     )
 
-    m = pattern.fullmatch(desc)
-    if not m:
-        raise ValueError(
-            "unsupported descriptor format: expected wpkh([fingerprint/path]xpub.../0/*)"
-        )
-
-    fingerprint = m.group("fingerprint")
-    origin_path = m.group("origin_path")
-    extpub = m.group("extpub")
-    branch = int(m.group("branch"))
-
-    if fingerprint is not None:
-        fingerprint = fingerprint.lower()
-    if origin_path is not None:
-        origin_path = origin_path.lstrip("/")
-    else:
-        origin_path = ""
-
-    prefix = extpub[:4]
-    if prefix not in SLIP132_TO_BIP32:
-        raise ValueError(f"unsupported extended key prefix: {prefix}")
-
-    return {
-        "fingerprint": fingerprint,
-        "origin_path": origin_path,
-        "extpub": extpub,
-        "branch": branch,
-        "descriptor": desc,
-    }
 
 def convert_slip132_to_bip32(extpub):
     prefix = extpub[:4]
@@ -159,25 +188,92 @@ def xpub_net_and_key(extpub):
         raise ValueError(f"Unsupported extended pub prefix: {prefix}")
     return "mainnet" if mainnet else "testnet"
 
-def derive_wpkh_addresses(extpub, count, branch, start_index=0):
-    net = xpub_net_and_key(extpub)
+
+# ─────────────────────────────────────────────────────────
+# ADDRESS DERIVATION — one function per script type
+# ─────────────────────────────────────────────────────────
+
+def _child_pubkey_bytes(extpub, branch, index):
     bip32_key = convert_slip132_to_bip32(extpub)
     account_ctx = Bip32Secp256k1.FromExtendedKey(bip32_key)
-    branch_ctx = account_ctx.ChildKey(branch)
+    child = account_ctx.ChildKey(branch).ChildKey(index)
+    return child.PublicKey().RawCompressed().ToBytes()
 
+
+def _derive_p2wpkh(extpub, count, branch, start_index, net):
+    hrp = (
+        CoinsConf.BitcoinMainNet.ParamByKey("p2wpkh_hrp")
+        if net == "mainnet"
+        else CoinsConf.BitcoinTestNet.ParamByKey("p2wpkh_hrp")
+    )
     addrs = []
     for i in range(start_index, start_index + count):
-        child = branch_ctx.ChildKey(i)
-        pubkey_bytes = child.PublicKey().RawCompressed().ToBytes()
-        hrp = (
-            CoinsConf.BitcoinMainNet.ParamByKey("p2wpkh_hrp")
-            if net == "mainnet"
-            else CoinsConf.BitcoinTestNet.ParamByKey("p2wpkh_hrp")
-        )
-        addr = P2WPKHAddrEncoder.EncodeKey(pubkey_bytes, hrp=hrp)
-        addrs.append(addr)
-
+        pub = _child_pubkey_bytes(extpub, branch, i)
+        addrs.append(P2WPKHAddrEncoder.EncodeKey(pub, hrp=hrp))
     return addrs
+
+
+def _derive_p2tr(extpub, count, branch, start_index, net):
+    hrp = (
+        CoinsConf.BitcoinMainNet.ParamByKey("p2tr_hrp")
+        if net == "mainnet"
+        else CoinsConf.BitcoinTestNet.ParamByKey("p2tr_hrp")
+    )
+    addrs = []
+    for i in range(start_index, start_index + count):
+        pub = _child_pubkey_bytes(extpub, branch, i)
+        addrs.append(P2TRAddrEncoder.EncodeKey(pub, hrp=hrp))
+    return addrs
+
+
+def _derive_p2pkh(extpub, count, branch, start_index, net):
+    ver = (
+        CoinsConf.BitcoinMainNet.ParamByKey("p2pkh_net_ver")
+        if net == "mainnet"
+        else CoinsConf.BitcoinTestNet.ParamByKey("p2pkh_net_ver")
+    )
+    addrs = []
+    for i in range(start_index, start_index + count):
+        pub = _child_pubkey_bytes(extpub, branch, i)
+        addrs.append(P2PKHAddrEncoder.EncodeKey(pub, net_ver=ver))
+    return addrs
+
+
+def _derive_p2sh_p2wpkh(extpub, count, branch, start_index, net):
+    ver = (
+        CoinsConf.BitcoinMainNet.ParamByKey("p2sh_net_ver")
+        if net == "mainnet"
+        else CoinsConf.BitcoinTestNet.ParamByKey("p2sh_net_ver")
+    )
+    addrs = []
+    for i in range(start_index, start_index + count):
+        pub = _child_pubkey_bytes(extpub, branch, i)
+        addrs.append(P2SHAddrEncoder.EncodeKey(pub, net_ver=ver))
+    return addrs
+
+
+def derive_addresses(parsed, count, branch, start_index=0):
+    """Derive `count` addresses starting at `start_index` for any supported dtype."""
+    extpub = parsed["extpub"]
+    net    = xpub_net_and_key(extpub)
+    dtype  = parsed["dtype"]
+
+    if dtype == "wpkh":
+        return _derive_p2wpkh(extpub, count, branch, start_index, net)
+    if dtype == "tr":
+        return _derive_p2tr(extpub, count, branch, start_index, net)
+    if dtype == "pkh":
+        return _derive_p2pkh(extpub, count, branch, start_index, net)
+    if dtype == "sh(wpkh)":
+        return _derive_p2sh_p2wpkh(extpub, count, branch, start_index, net)
+    raise ValueError(f"Unknown dtype: {dtype}")
+
+
+# Legacy name kept for any external callers
+def derive_wpkh_addresses(extpub, count, branch, start_index=0):
+    net = xpub_net_and_key(extpub)
+    return _derive_p2wpkh(extpub, count, branch, start_index, net)
+
 
 def api_get(path):
     _rate_limit_delay()
@@ -947,7 +1043,6 @@ def detect_tainted_utxo_merge(g):
     findings = []
     BATCH_THRESHOLD = 5
 
-    # First, identify txids that look like exchange batch withdrawals
     exchange_txids = set()
     for txid in g.our_txids:
         tx = g.fetch_tx(txid)
@@ -966,7 +1061,6 @@ def detect_tainted_utxo_merge(g):
     if not exchange_txids:
         return findings
 
-    # Now find spending transactions that mix exchange UTXOs with others
     for txid in g.our_txids:
         input_addrs = g.get_input_addresses(txid)
         if len(input_addrs) < 2:
@@ -1373,11 +1467,11 @@ def detect_fee_fingerprinting(g):
     return findings
 
 
-def build_addr_map(addresses, branch, start_index=0):
+def build_addr_map(addresses, branch, start_index=0, script_type="p2wpkh"):
     addr_map = {}
     for i, addr in enumerate(addresses, start=start_index):
         addr_map[addr] = {
-            "type": "p2wpkh",
+            "type": script_type,
             "internal": branch == 1,
             "index": i,
         }
@@ -1388,8 +1482,8 @@ def scan_branch(parsed, offset, count, branch):
     global _scan_start_offset
     _scan_start_offset = offset
 
-    addresses = derive_wpkh_addresses(parsed["extpub"], count, branch, start_index=offset)
-    addr_map = build_addr_map(addresses, branch, start_index=offset)
+    addresses = derive_addresses(parsed, count, branch, start_index=offset)
+    addr_map = build_addr_map(addresses, branch, start_index=offset, script_type=parsed["script_type"])
     tx_map, addr_txs, utxos, active_addresses, addr_received_outputs = collect_wallet_data(addresses)
     graph = TxGraph(addr_map, tx_map, addr_txs, utxos, addr_received_outputs)
 
