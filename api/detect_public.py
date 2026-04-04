@@ -6,8 +6,9 @@ import os
 import json
 import time
 from collections import defaultdict
+from functools import cached_property
 from dataclasses import dataclass, field
-from typing import Optional, Set
+from typing import Optional, Set, List
 
 import requests
 from bip_utils import (
@@ -515,6 +516,8 @@ class TxGraph:
         self.utxos = utxos
         self.our_txids = set(tx_map.keys())
         self.addr_received_outputs = addr_received_outputs or defaultdict(list)
+        self._input_cache: dict[str, list[dict]] = {}
+        self._output_cache: dict[str, list[dict]] = {}
 
     def fetch_tx(self, txid):
         return self.tx_map.get(txid)
@@ -522,37 +525,104 @@ class TxGraph:
     def is_ours(self, address):
         return address in self.our_addrs
 
-    def get_input_addresses(self, txid):
+    def address_role(self, address, txid=None):
+        if address not in self.our_addrs:
+            return "external"
+        meta = self.addr_map.get(address, {})
+        if meta.get("internal"):
+            return "change"
+        return "receive"
+
+    def input_participants(self, txid):
+        cached = self._input_cache.get(txid)
+        if cached is not None:
+            return cached
         tx = self.fetch_tx(txid)
         if not tx:
+            self._input_cache[txid] = []
             return []
-        addrs = []
+        result = []
         for vin in tx.get("vin", []):
+            if vin.get("is_coinbase"):
+                result.append({
+                    "address": "",
+                    "value": 0,
+                    "value_sats": 0,
+                    "txid": "",
+                    "vout": 0,
+                    "role": "coinbase",
+                    "script_type": "coinbase",
+                    "ours": False,
+                })
+                continue
             prev = vin.get("prevout") or {}
-            addrs.append({
-                "address": prev.get("scriptpubkey_address", ""),
-                "value": prev.get("value", 0) / 100_000_000,
+            addr = prev.get("scriptpubkey_address", "")
+            sats = prev.get("value", 0)
+            result.append({
+                "address": addr,
+                "value": sats / 100_000_000,
+                "value_sats": sats,
                 "txid": vin.get("txid", ""),
                 "vout": vin.get("vout", 0),
+                "role": self.address_role(addr, txid),
+                "script_type": self.get_script_type(addr) if addr else "unknown",
+                "ours": self.is_ours(addr),
             })
-        return addrs
+        self._input_cache[txid] = result
+        return result
 
-    def get_output_addresses(self, txid):
+    def output_participants(self, txid):
+        cached = self._output_cache.get(txid)
+        if cached is not None:
+            return cached
         tx = self.fetch_tx(txid)
         if not tx:
+            self._output_cache[txid] = []
             return []
-        addrs = []
+        result = []
         for vout in tx.get("vout", []):
-            addrs.append({
-                "address": vout.get("scriptpubkey_address", ""),
-                "value": vout.get("value", 0) / 100_000_000,
+            addr = vout.get("scriptpubkey_address", "")
+            sats = vout.get("value", 0)
+            st = vout.get("scriptpubkey_type", "unknown")
+            result.append({
+                "address": addr,
+                "value": sats / 100_000_000,
+                "value_sats": sats,
                 "n": vout.get("n", 0),
-                "type": vout.get("scriptpubkey_type", "unknown"),
+                "script_type": st,
+                "type": st,
+                "role": self.address_role(addr, txid),
+                "ours": self.is_ours(addr),
             })
-        return addrs
+        self._output_cache[txid] = result
+        return result
+
+    @cached_property
+    def our_send_txids(self):
+        result = []
+        for txid in self.our_txids:
+            participants = self.input_participants(txid)
+            if any(p["ours"] for p in participants):
+                result.append(txid)
+        return result
+
+    @cached_property
+    def our_receive_txids(self):
+        result = []
+        for txid in self.our_txids:
+            inputs = self.input_participants(txid)
+            outputs = self.output_participants(txid)
+            if not any(p["ours"] for p in inputs) and any(p["ours"] for p in outputs):
+                result.append(txid)
+        return result
+
+    def get_input_addresses(self, txid):
+        return self.input_participants(txid)
+
+    def get_output_addresses(self, txid):
+        return self.output_participants(txid)
 
     def get_script_type(self, address):
-        """Return script type — from addr_map or address-prefix heuristic."""
         meta = self.addr_map.get(address)
         if meta:
             return meta.get("type", "unknown")
@@ -659,20 +729,20 @@ def detect_dust_spending(g, cfg: ScanConfig):
     findings = []
 
     for txid in g.our_txids:
-        input_addrs = g.get_input_addresses(txid)
-        if not input_addrs or len(input_addrs) < 2:
+        inputs = g.input_participants(txid)
+        if not inputs or len(inputs) < 2:
             continue
 
         dust_inputs = []
         normal_inputs = []
-        for ia in input_addrs:
-            if not g.is_ours(ia["address"]):
+        for p in inputs:
+            if not p["ours"]:
                 continue
-            sats = satoshis(ia["value"])
+            sats = satoshis(p["value"])
             if sats <= cfg.dust_sats:
-                dust_inputs.append(ia)
+                dust_inputs.append(p)
             elif sats > cfg.normal_input_min_sats:
-                normal_inputs.append(ia)
+                normal_inputs.append(p)
 
         if dust_inputs and normal_inputs:
             findings.append({
@@ -699,10 +769,10 @@ def detect_dust_spending(g, cfg: ScanConfig):
 def detect_cioh(g, cfg: ScanConfig):
     findings = []
     for txid in g.our_txids:
-        inputs = g.get_input_addresses(txid)
+        inputs = g.input_participants(txid)
         if len(inputs) < 2:
             continue
-        our_inputs = [i for i in inputs if g.is_ours(i["address"])]
+        our_inputs = [p for p in inputs if p["ours"]]
         if len(our_inputs) >= 2:
             n_ours = len(our_inputs)
             total = len(inputs)
@@ -717,7 +787,7 @@ def detect_cioh(g, cfg: ScanConfig):
                     "our_inputs": n_ours,
                     "total_inputs": total,
                     "ownership_pct": ownership_pct,
-                    "our_input_addresses": [i["address"] for i in our_inputs][:5],
+                    "our_input_addresses": [p["address"] for p in our_inputs][:5],
                 },
                 "correction": "Use coin control to avoid merging multiple UTXOs in a single transaction. If consolidation is unavoidable, do it via CoinJoin.",
             })
@@ -731,18 +801,18 @@ def detect_change_detection(g, cfg: ScanConfig):
         tx = g.fetch_tx(txid)
         if not tx:
             continue
-        outputs = g.get_output_addresses(txid)
-        input_addrs = g.get_input_addresses(txid)
+        outputs = g.output_participants(txid)
+        inputs = g.input_participants(txid)
         if not outputs or len(outputs) < 2:
             continue
 
-        our_in = [ia for ia in input_addrs if g.is_ours(ia["address"])]
+        our_in = [p for p in inputs if p["ours"]]
         if not our_in:
             continue
 
-        our_outs = [o for o in outputs if g.is_ours(o["address"])]
-        ext_outs = [o for o in outputs if not g.is_ours(o["address"])
-                    and o.get("type") != "op_return"]
+        our_outs = [p for p in outputs if p["ours"]]
+        ext_outs = [p for p in outputs if not p["ours"]
+                    and p.get("script_type") != "op_return"]
 
         if not our_outs or not ext_outs:
             continue
@@ -761,7 +831,7 @@ def detect_change_detection(g, cfg: ScanConfig):
                         f"Round payment ({pay_sats:,} sats) vs non-round change ({ch_sats:,} sats)"
                     )
 
-                in_types = {g.get_script_type(ia["address"]) for ia in our_in}
+                in_types = {p["script_type"] for p in our_in}
                 ch_type = g.get_script_type(change["address"])
                 pay_type = g.get_script_type(payment["address"])
                 if ch_type in in_types and ch_type != pay_type:
@@ -769,8 +839,7 @@ def detect_change_detection(g, cfg: ScanConfig):
                         f"Change script type ({ch_type}) matches input but differs from payment ({pay_type})"
                     )
 
-            ch_meta = g.addr_map.get(change["address"], {})
-            if ch_meta.get("internal"):
+            if change["role"] == "change":
                 if "BIP-44 internal path" not in " ".join(problems):
                     problems.append(
                         "Change uses an internal (BIP-44 /1/*) derivation path — standard wallet change pattern"
@@ -819,8 +888,8 @@ def detect_consolidation(g, cfg: ScanConfig):
         n_out = len(parent.get("vout", []))
         if n_in >= cfg.consolidation_min_inputs and n_out <= cfg.consolidation_max_outputs:
             seen_txids.add(parent_txid)
-            parent_inputs = g.get_input_addresses(parent_txid)
-            our_parent_in = [ia for ia in parent_inputs if g.is_ours(ia["address"])]
+            parent_inputs = g.input_participants(parent_txid)
+            our_parent_in = [p for p in parent_inputs if p["ours"]]
             findings.append({
                 "type": "CONSOLIDATION",
                 "severity": "MEDIUM",
@@ -850,15 +919,15 @@ def detect_script_type_mixing(g, cfg: ScanConfig):
     findings = []
 
     for txid in g.our_txids:
-        input_addrs = g.get_input_addresses(txid)
-        if len(input_addrs) < 2:
+        inputs = g.input_participants(txid)
+        if len(inputs) < 2:
             continue
 
-        our_in = [ia for ia in input_addrs if g.is_ours(ia["address"])]
+        our_in = [p for p in inputs if p["ours"]]
         if len(our_in) < 2:
             continue
 
-        types = {g.get_script_type(ia["address"]) for ia in input_addrs}
+        types = {p["script_type"] for p in inputs}
         types.discard("unknown")
 
         if len(types) >= 2:
@@ -874,11 +943,11 @@ def detect_script_type_mixing(g, cfg: ScanConfig):
                     "script_types": sorted(types),
                     "inputs": [
                         {
-                            "address": ia["address"],
-                            "script_type": g.get_script_type(ia["address"]),
-                            "ours": g.is_ours(ia["address"]),
+                            "address": p["address"],
+                            "script_type": p["script_type"],
+                            "ours": p["ours"],
                         }
-                        for ia in input_addrs
+                        for p in inputs
                     ],
                 },
                 "correction": (
@@ -895,17 +964,17 @@ def detect_cluster_merge(g, cfg: ScanConfig):
     findings = []
 
     for txid in g.our_txids:
-        input_addrs = g.get_input_addresses(txid)
-        if len(input_addrs) < 2:
+        inputs = g.input_participants(txid)
+        if len(inputs) < 2:
             continue
 
-        our_in = [ia for ia in input_addrs if g.is_ours(ia["address"])]
+        our_in = [p for p in inputs if p["ours"]]
         if len(our_in) < 2:
             continue
 
         funding_sources = {}
-        for ia in our_in:
-            parent = g.fetch_tx(ia["txid"])
+        for p in our_in:
+            parent = g.fetch_tx(p["txid"])
             if not parent:
                 continue
             gp_sources = set()
@@ -917,7 +986,7 @@ def detect_cluster_merge(g, cfg: ScanConfig):
                     if src:
                         gp_sources.add(src[:16])
             if gp_sources:
-                funding_sources[f"{ia['txid'][:16]}:{ia['vout']}"] = gp_sources
+                funding_sources[f"{p['txid'][:16]}:{p['vout']}"] = gp_sources
 
         all_sources = list(funding_sources.values())
         if len(all_sources) >= 2:
@@ -1028,14 +1097,14 @@ def detect_exchange_origin(g, cfg: ScanConfig):
         if not tx:
             continue
 
-        vouts = tx.get("vout", [])
-        n_out = len(vouts)
+        outputs = g.output_participants(txid)
+        n_out = len(outputs)
         if n_out < cfg.exchange_batch_outputs:
             continue
 
-        our_inputs = [ia for ia in g.get_input_addresses(txid) if g.is_ours(ia["address"])]
-        our_outputs = g.get_output_addresses(txid)
-        our_outputs = [o for o in our_outputs if g.is_ours(o["address"])]
+        inputs = g.input_participants(txid)
+        our_inputs = [p for p in inputs if p["ours"]]
+        our_outputs = [p for p in outputs if p["ours"]]
 
         if our_inputs:
             continue
@@ -1045,17 +1114,12 @@ def detect_exchange_origin(g, cfg: ScanConfig):
         signals = []
         signals.append(f"High output count: {n_out}")
 
-        unique_addrs = {
-            vout.get("scriptpubkey_address", "")
-            for vout in vouts
-            if vout.get("scriptpubkey_address")
-        }
+        unique_addrs = {p["address"] for p in outputs if p["address"]}
         if len(unique_addrs) >= cfg.exchange_batch_outputs:
             signals.append(f"{len(unique_addrs)} unique recipient addresses")
 
-        input_addrs = g.get_input_addresses(txid)
-        input_total = sum(ia["value"] for ia in input_addrs)
-        output_vals = sorted(vout.get("value", 0) / 100_000_000 for vout in vouts)
+        input_total = sum(p["value"] for p in inputs)
+        output_vals = sorted(p["value"] for p in outputs)
         if output_vals:
             median_out = output_vals[len(output_vals) // 2]
             if median_out > 0:
@@ -1098,31 +1162,29 @@ def detect_tainted_utxo_merge(g, cfg: ScanConfig):
         tx = g.fetch_tx(txid)
         if not tx:
             continue
-        vouts = tx.get("vout", [])
-        if len(vouts) < cfg.exchange_batch_outputs:
+        outputs = g.output_participants(txid)
+        if len(outputs) < cfg.exchange_batch_outputs:
             continue
-        our_inputs = [ia for ia in g.get_input_addresses(txid) if g.is_ours(ia["address"])]
-        if our_inputs:
+        inputs = g.input_participants(txid)
+        if any(p["ours"] for p in inputs):
             continue
-        our_outputs = [o for o in g.get_output_addresses(txid) if g.is_ours(o["address"])]
-        if our_outputs:
+        if any(p["ours"] for p in outputs):
             exchange_txids.add(txid)
 
     if not exchange_txids:
         return findings, warnings
 
-    # 1. TAINTED_UTXO_MERGE — exchange UTXO co-spent with clean UTXOs
     for txid in g.our_txids:
-        input_addrs = g.get_input_addresses(txid)
-        if len(input_addrs) < 2:
+        inputs = g.input_participants(txid)
+        if len(inputs) < 2:
             continue
 
-        our_in = [ia for ia in input_addrs if g.is_ours(ia["address"])]
+        our_in = [p for p in inputs if p["ours"]]
         if len(our_in) < 2:
             continue
 
-        tainted = [ia for ia in our_in if ia.get("txid") in exchange_txids]
-        clean = [ia for ia in our_in if ia.get("txid") not in exchange_txids]
+        tainted = [p for p in our_in if p["txid"] in exchange_txids]
+        clean = [p for p in our_in if p["txid"] not in exchange_txids]
 
         if tainted and clean:
             findings.append({
@@ -1135,12 +1197,12 @@ def detect_tainted_utxo_merge(g, cfg: ScanConfig):
                 "details": {
                     "txid": txid,
                     "tainted_inputs": [
-                        {"address": ia["address"], "from_exchange_tx": ia["txid"][:16]}
-                        for ia in tainted
+                        {"address": p["address"], "from_exchange_tx": p["txid"][:16]}
+                        for p in tainted
                     ],
                     "clean_inputs": [
-                        {"address": ia["address"], "amount_btc": round(ia["value"], 8)}
-                        for ia in clean
+                        {"address": p["address"], "amount_btc": round(p["value"], 8)}
+                        for p in clean
                     ],
                 },
                 "correction": (
@@ -1150,7 +1212,6 @@ def detect_tainted_utxo_merge(g, cfg: ScanConfig):
                 ),
             })
 
-    # 2. DIRECT_TAINT — unspent exchange UTXO not yet merged (preemptive warning)
     already_merged_txids = {f.get("details", {}).get("txid", "") for f in findings}
     unspent_txids = {u["txid"] for u in g.utxos if g.is_ours(u.get("address", ""))}
 
@@ -1160,7 +1221,7 @@ def detect_tainted_utxo_merge(g, cfg: ScanConfig):
         if ex_txid in already_merged_txids:
             continue
 
-        our_outputs = [o for o in g.get_output_addresses(ex_txid) if g.is_ours(o["address"])]
+        our_outputs = [p for p in g.output_participants(ex_txid) if p["ours"]]
         if not our_outputs:
             continue
 
@@ -1175,8 +1236,8 @@ def detect_tainted_utxo_merge(g, cfg: ScanConfig):
             "details": {
                 "txid": ex_txid,
                 "received_outputs": [
-                    {"address": o["address"], "amount_btc": round(o["value"], 8)}
-                    for o in our_outputs
+                    {"address": p["address"], "amount_btc": round(p["value"], 8)}
+                    for p in our_outputs
                 ],
             },
             "correction": (
@@ -1192,12 +1253,7 @@ def detect_tainted_utxo_merge(g, cfg: ScanConfig):
 def detect_behavioral_fingerprint(g, cfg: ScanConfig):
     findings = []
 
-    send_txids = []
-    for txid in g.our_txids:
-        input_addrs = g.get_input_addresses(txid)
-        our_in = [ia for ia in input_addrs if g.is_ours(ia["address"])]
-        if our_in:
-            send_txids.append(txid)
+    send_txids = g.our_send_txids
 
     if len(send_txids) < cfg.min_send_txs_for_behavioral:
         return findings
@@ -1229,17 +1285,17 @@ def detect_behavioral_fingerprint(g, cfg: ScanConfig):
             seq = vin.get("sequence", 0xffffffff)
             rbf_signals.append(seq < 0xfffffffe)
 
-        for ia in g.get_input_addresses(txid):
-            if g.is_ours(ia["address"]):
-                input_script_types.append(g.get_script_type(ia["address"]))
+        for p in g.input_participants(txid):
+            if p["ours"]:
+                input_script_types.append(p["script_type"])
 
-        for out in g.get_output_addresses(txid):
-            sats = satoshis(out["value"])
-            if g.is_ours(out["address"]):
-                change_address_types_used.add(out["type"])
+        for p in g.output_participants(txid):
+            sats = satoshis(p["value"])
+            if p["ours"]:
+                change_address_types_used.add(p["script_type"])
             else:
                 payment_amounts_sats.append(sats)
-                payment_address_types_used.add(out["type"])
+                payment_address_types_used.add(p["script_type"])
                 total_payments += 1
                 if sats > 0 and (sats % 100_000 == 0 or sats % 1_000_000 == 0):
                     uses_round_amounts += 1
@@ -1358,21 +1414,18 @@ def detect_payjoin_interaction(g, cfg: ScanConfig):
         tx = g.fetch_tx(txid)
         if not tx:
             continue
-        inputs = g.get_input_addresses(txid)
+        inputs = g.input_participants(txid)
         if len(inputs) < 2:
             continue
 
-        our_input_addrs = [i["address"] for i in inputs if g.is_ours(i["address"])]
-        ext_input_addrs = [i["address"] for i in inputs if not g.is_ours(i["address"]) and i["address"]]
+        our_input_addrs = [p["address"] for p in inputs if p["ours"]]
+        ext_input_addrs = [p["address"] for p in inputs if not p["ours"] and p["address"]]
 
         if not our_input_addrs or not ext_input_addrs:
             continue
 
-        our_output_addrs = [
-            vout.get("scriptpubkey_address", "")
-            for vout in tx.get("vout", [])
-            if g.is_ours(vout.get("scriptpubkey_address", ""))
-        ]
+        outputs = g.output_participants(txid)
+        our_output_addrs = [p["address"] for p in outputs if p["ours"]]
 
         if our_output_addrs:
             findings.append({
@@ -1403,19 +1456,16 @@ def detect_whirlpool_patterns(g, cfg: ScanConfig):
         if not tx:
             continue
 
-        vouts = tx.get("vout", [])
-        if len(vouts) < 4:
+        outputs = g.output_participants(txid)
+        if len(outputs) < 4:
             continue
 
-        output_values = [vout.get("value", 0) for vout in vouts]
+        output_values = [p["value_sats"] for p in outputs]
 
         for pool_sats in WHIRLPOOL_POOL_AMOUNTS:
             matching = [v for v in output_values if v == pool_sats]
             if len(matching) >= 4:
-                our_outputs = [
-                    vout for vout in vouts
-                    if vout.get("value") == pool_sats and g.is_ours(vout.get("scriptpubkey_address", ""))
-                ]
+                our_outputs = [p for p in outputs if p["value_sats"] == pool_sats and p["ours"]]
                 if our_outputs:
                     findings.append({
                         "type": "WHIRLPOOL_COINJOIN",
@@ -1464,11 +1514,10 @@ def detect_fee_fingerprinting(g, cfg: ScanConfig):
                     "fee_sats": fee,
                 })
 
-        vouts = tx.get("vout", [])
+        outputs = g.output_participants(txid)
         external_outputs = [
-            vout for vout in vouts
-            if not g.is_ours(vout.get("scriptpubkey_address", ""))
-            and vout.get("scriptpubkey_type") != "op_return"
+            p for p in outputs
+            if not p["ours"] and p["script_type"] != "op_return"
         ]
         if len(external_outputs) >= 5:
             batch_payment_txids.append({
@@ -1476,15 +1525,14 @@ def detect_fee_fingerprinting(g, cfg: ScanConfig):
                 "external_output_count": len(external_outputs),
             })
 
-        our_outputs = [vout for vout in vouts if g.is_ours(vout.get("scriptpubkey_address", ""))]
+        our_outputs = [p for p in outputs if p["ours"]]
         non_our_outputs = [
-            vout for vout in vouts
-            if not g.is_ours(vout.get("scriptpubkey_address", ""))
-            and vout.get("scriptpubkey_type") != "op_return"
+            p for p in outputs
+            if not p["ours"] and p["script_type"] != "op_return"
         ]
         if our_outputs and non_our_outputs:
-            our_max = max(v.get("value", 0) for v in our_outputs)
-            ext_max = max(v.get("value", 0) for v in non_our_outputs)
+            our_max = max(p["value_sats"] for p in our_outputs)
+            ext_max = max(p["value_sats"] for p in non_our_outputs)
             if ext_max > 0 and our_max / ext_max < cfg.tiny_change_ratio and our_max < cfg.tiny_change_max_sats:
                 tiny_change_txids.append({
                     "txid": txid,
