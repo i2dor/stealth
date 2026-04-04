@@ -1608,6 +1608,63 @@ def build_addr_map(addresses, branch, start_index=0, script_type="p2wpkh"):
     return addr_map
 
 
+SEVERITY_PENALTY = {
+    "CRITICAL": 20,
+    "HIGH": 12,
+    "MEDIUM": 6,
+    "LOW": 2,
+    "INFO": 1,
+}
+
+WARNING_PENALTY = {
+    "CRITICAL": 8,
+    "HIGH": 5,
+    "MEDIUM": 3,
+    "LOW": 1,
+    "INFO": 0,
+}
+
+GRADE_THRESHOLDS = [
+    (90, "A", "Excellent privacy practices"),
+    (70, "B", "Good — minor issues detected"),
+    (50, "C", "Fair — some privacy risks"),
+    (30, "D", "Poor — significant exposure"),
+    (0,  "F", "Critical — immediate action needed"),
+]
+
+
+def compute_privacy_score(findings, warnings):
+    deductions = 0
+    severity_counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0, "INFO": 0}
+
+    for f in findings:
+        sev = f.get("severity", "INFO")
+        severity_counts[sev] = severity_counts.get(sev, 0) + 1
+        deductions += SEVERITY_PENALTY.get(sev, 1)
+
+    for w in warnings:
+        sev = w.get("severity", "LOW")
+        deductions += WARNING_PENALTY.get(sev, 1)
+
+    score = max(0, 100 - deductions)
+
+    grade = "F"
+    label = "Critical — immediate action needed"
+    for threshold, g, l in GRADE_THRESHOLDS:
+        if score >= threshold:
+            grade = g
+            label = l
+            break
+
+    return {
+        "score": score,
+        "grade": grade,
+        "label": label,
+        "deductions": deductions,
+        "severity_breakdown": severity_counts,
+    }
+
+
 def scan_branch(parsed, offset, count, branch, cfg: ScanConfig = None):
     global _scan_start_offset
     _scan_start_offset = offset
@@ -1684,6 +1741,7 @@ def scan_branch(parsed, offset, count, branch, cfg: ScanConfig = None):
             "findings": len(findings),
             "warnings": len(warnings),
             "clean": len(findings) == 0 and len(warnings) == 0,
+            "privacy_score": compute_privacy_score(findings, warnings),
         },
         "_active_addresses": active_addresses,
     }
@@ -1740,6 +1798,7 @@ def _merge_branch_reports(reports):
             "findings": len(all_findings),
             "warnings": len(all_warnings),
             "clean": len(all_findings) == 0 and len(all_warnings) == 0,
+            "privacy_score": compute_privacy_score(all_findings, all_warnings),
         },
         "aggregate_scan_window": {
             "from_index": from_index or 0,
