@@ -38,7 +38,7 @@ Descriptors with key origin `[fingerprint/derivation/path]xpub.../branch/*` are 
 
 ## Detection taxonomy
 
-Stealth runs **17 independent detectors** grouped into findings (actionable privacy violations) and warnings (informational).
+Stealth runs **18 independent detectors** grouped into findings (actionable privacy violations) and warnings (informational).
 
 ### Severity scale
 
@@ -191,6 +191,17 @@ Detects UTXOs that are significantly older than the newest UTXO in the wallet (>
 - **Triggered by:** 1+ UTXOs with a block height >= 100 blocks older than the newest UTXO
 - **Reported as:** warning (not finding) since dormancy is behavioral, not a direct vulnerability
 - **Fix:** Route old UTXOs through a CoinJoin to reset their history, or spend with FIFO coin selection.
+
+---
+
+### `DIRECT_TAINT` — Direct KYC Exposure *(warning)*
+**Severity: HIGH**
+
+Detects unspent UTXOs received directly from exchange batch withdrawals that have not yet been merged with other funds. These UTXOs carry a KYC fingerprint linking them to a centralized custodian where your identity was verified. While not yet a privacy leak (the funds haven't been co-spent), they represent an immediate risk if spent alongside unrelated UTXOs.
+
+- **Triggered by:** unspent UTXO(s) whose funding transaction matches exchange-origin patterns (5+ outputs, many unique recipients) and no merge with other wallet inputs has occurred yet
+- **Reported as:** warning (preemptive — no privacy breach has happened yet, but one is imminent if the UTXO is merged carelessly)
+- **Fix:** Pass the exchange UTXO through a CoinJoin (Whirlpool, JoinMarket) before spending. Never merge it with funds from other sources — doing so will link your exchange identity to your entire spending history.
 
 ---
 
