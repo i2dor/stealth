@@ -1,5 +1,6 @@
 import { useRef } from 'react'
 import FindingCard from '../components/FindingCard'
+import PrivacyScore from '../components/PrivacyScore'
 import styles from './ReportScreen.module.css'
 
 function truncateDescriptor(desc) {
@@ -173,6 +174,31 @@ async function exportPDF(aggregateReport, descriptor) {
     doc.text(box.label.toUpperCase(), bx + boxW / 2, y + 40, { align: 'center' })
   })
   y += 64
+
+  // ── PRIVACY SCORE ──────────────────────────────────────
+  const summary = aggregateReport?.summary || {}
+  const ps = summary.privacy_score
+  if (ps) {
+    const GRADE_PDF_COLORS = {
+      A: COLORS.accent, B: [74, 222, 128], C: COLORS.warning,
+      D: [255, 140, 66], F: COLORS.danger,
+    }
+    const gc = GRADE_PDF_COLORS[ps.grade] || COLORS.muted
+    doc.setFillColor(25, 25, 32)
+    doc.roundedRect(MARGIN, y, CONTENT_W, 40, 4, 4, 'F')
+    doc.setFontSize(24)
+    doc.setFont('helvetica', 'bold')
+    doc.setTextColor(...gc)
+    doc.text(`${ps.score}`, MARGIN + 20, y + 27)
+    const scoreW = doc.getTextWidth(`${ps.score}`)
+    doc.setFontSize(14)
+    doc.text(ps.grade, MARGIN + 24 + scoreW, y + 27)
+    doc.setFontSize(10)
+    doc.setFont('helvetica', 'normal')
+    doc.setTextColor(...COLORS.text)
+    doc.text(ps.label, MARGIN + 100, y + 24)
+    y += 52
+  }
 
   hline()
 
@@ -405,6 +431,8 @@ export default function ReportScreen({
             Next batch →
           </button>
         </div>
+
+        <PrivacyScore data={summary.privacy_score} />
 
         <div className={styles.summaryBar}>
           <div className={`${styles.summaryCard} ${styles.vulnerable}`}>
