@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  backend:
+    name: Backend checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Syntax check
+        run: python -m py_compile api/detect_public.py && python -m py_compile api/scan.py
+
+      - name: Verify imports
+        run: python -c "from api.detect_public import run_scan, run_auto_scan, ScanConfig, ALL_DETECTORS; print(f'{len(ALL_DETECTORS)} detectors loaded')"
+
+  frontend:
+    name: Frontend build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: yarn install --frozen-lockfile || yarn install
+
+      - name: Build
+        working-directory: frontend
+        run: yarn build
