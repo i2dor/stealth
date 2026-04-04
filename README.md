@@ -384,9 +384,14 @@ Recommended for most users: **Local backend + Tor**.
 
 ```
 stealth/
+├── .github/
+│   └── workflows/
+│       └── ci.yml              # GitHub Actions CI (Python + frontend build)
 ├── api/
-│   ├── scan.py             # Vercel serverless handler (GET /api/scan)
-│   └── detect_public.py    # Core analysis engine + all detectors
+│   ├── scan.py                 # Vercel serverless handler (GET /api/scan)
+│   └── detect_public.py        # Core analysis engine + all detectors + TxGraph
+├── backend/
+│   └── script/                 # Regtest scripts and RPC utilities
 ├── frontend/
 │   └── src/
 │       ├── screens/
@@ -399,9 +404,44 @@ stealth/
 │       │   └── VulnerabilityBadge.jsx  # Severity badge (CRITICAL/HIGH/MEDIUM/LOW/INFO)
 │       └── services/
 │           └── walletService.js     # API client (fetch + pagination)
+├── docs/                       # Usage and architecture documentation
+├── slides/                     # Slidev pitch presentation
+├── src-tauri/                  # Tauri desktop app wrapper
+├── GOVERNANCE.md               # Contribution guidelines and conventions
 ├── requirements.txt
-└── LICENSE                 # MIT
+└── LICENSE                     # MIT
 ```
+
+---
+
+## API query parameters
+
+All parameters are passed as query string to `GET /api/scan`.
+
+| Parameter | Required | Default | Description |
+|---|---|---|---|
+| `descriptor` | **Yes** | — | Wallet descriptor (e.g. `wpkh([fingerprint/84h/0h/0h]xpub.../0/*)`) |
+| `offset` | No | `0` | Start index for address derivation |
+| `count` | No | `60` | Number of addresses to derive per batch |
+| `branch` | No | `receive` | Which derivation branch: `receive`, `change`, or `both` |
+| `auto` | No | `0` | Set to `1` for auto gap-limit scanning (BIP44-style) |
+| `tor_proxy` | No | *(empty)* | SOCKS5 proxy URL (e.g. `socks5h://127.0.0.1:9050`) |
+| `config` | No | *(defaults)* | JSON object overriding detector thresholds |
+| `detectors` | No | `all` | Comma-separated list of detectors to run, or `all` |
+
+**Config example** — override thresholds:
+
+```
+?config={"dust_sats":500,"consolidation_min_inputs":5,"exchange_batch_outputs":8}
+```
+
+**Detectors example** — run only specific detectors:
+
+```
+?detectors=cioh,dust,address_reuse,change_detection
+```
+
+Available detector IDs: `address_reuse`, `dust`, `dust_spending`, `cioh`, `change_detection`, `consolidation`, `script_type_mixing`, `cluster_merge`, `utxo_age_spread`, `exchange_origin`, `tainted_utxo_merge`, `behavioral_fingerprint`, `payjoin_interaction`, `whirlpool_patterns`, `fee_fingerprinting`.
 
 ---
 
@@ -423,10 +463,23 @@ stealth/
       "correction": "Use coin control to avoid merging multiple UTXOs..."
     }
   ],
-  "warnings": [],
+  "warnings": [
+    {
+      "type": "DIRECT_TAINT",
+      "severity": "HIGH",
+      "description": "TX def456...  is directly from a known exchange-origin source...",
+      "details": {
+        "txid": "def456...",
+        "received_outputs": [
+          {"address": "bc1q...", "amount_btc": 0.05}
+        ]
+      },
+      "correction": "Pass this UTXO through a CoinJoin before spending..."
+    }
+  ],
   "summary": {
     "findings": 1,
-    "warnings": 0,
+    "warnings": 1,
     "clean": false
   },
   "stats": {
